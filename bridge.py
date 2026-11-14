@@ -871,8 +871,18 @@ def _chain():
     here = os.path.dirname(os.path.abspath(__file__))
     rest = [p for p in sys.path if os.path.abspath(p or os.curdir) != here]
     spec = importlib.machinery.PathFinder.find_spec("sitecustomize", rest)
-    if spec and spec.loader:
+    while spec and spec.loader:
+        # A private runner and an older global hook can both be on PYTHONPATH; don't chain them recursively.
+        if spec.origin and spec.origin.endswith(".py"):
+            with open(spec.origin, "rb") as f:
+                ours = f.read(32).startswith(b"# mockingbird:")
+            if ours:
+                other = os.path.dirname(os.path.abspath(spec.origin))
+                rest = [p for p in rest if os.path.abspath(p or os.curdir) != other]
+                spec = importlib.machinery.PathFinder.find_spec("sitecustomize", rest)
+                continue
         spec.loader.exec_module(importlib.util.module_from_spec(spec))
+        break
 
 
 _chain()

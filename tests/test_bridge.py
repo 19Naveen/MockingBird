@@ -350,6 +350,24 @@ assert asyncio.run(httpx.AsyncClient().send(Request())) == "127.0.0.1"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("PYTHONPATH", result.stdout)
 
+    def test_runner_chains_custom_startup_without_recursing_into_global_hook(self):
+        legacy, custom = self.root / "legacy-hook", self.root / "custom-startup"
+        legacy.mkdir()
+        custom.mkdir()
+        # Reproduce the old hook's chaining algorithm: it would find and re-enter the runner hook.
+        (legacy / "sitecustomize.py").write_text('''# mockingbird: old global hook
+import importlib.machinery, importlib.util, os, sys
+rest = [p for p in sys.path if os.path.abspath(p or os.curdir) != os.path.dirname(__file__)]
+spec = importlib.machinery.PathFinder.find_spec("sitecustomize", rest)
+if spec and spec.loader:
+    spec.loader.exec_module(importlib.util.module_from_spec(spec))
+''')
+        (custom / "sitecustomize.py").write_text('import os; os.environ["CUSTOM_STARTUP_RAN"] = "1"\n')
+        with patch.dict(os.environ, PYTHONPATH=os.pathsep.join([str(legacy), str(custom)])):
+            result = self.runner('import os; assert os.environ.get("CUSTOM_STARTUP_RAN") == "1"', "--agent")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("RecursionError", result.stderr)
+
     def test_scripted_delay_can_trigger_a_client_timeout(self):
         import socket
         bridge.FAULTS = [{"delay": 0.1, "status": 503}]
