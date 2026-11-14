@@ -7,13 +7,16 @@
 ## Commands
 
 ```bash
-python3 -m unittest discover -s tests -v            # full unit suite (~10s, 5 skips)
+python3 -m unittest discover -s tests -v            # full unit suite
 python3 tests/test_bridge.py                        # one test module
 python3 tests/test_bridge.py BridgeTests.test_name  # one test
 python3 -m unittest discover -s tests -p 'test_google.py' -v
+python3 bridge.py version                           # source entry point
+PYTHONPATH=src python3 -m mockingbird version       # module entry point
+bash -n install.sh uninstall.sh                     # CI shell syntax check
 ```
 
-Provider smokes need optional SDKs and stay entirely local; run them from the repo root:
+The unit suite is stdlib-only; provider smokes need `uv` and optional SDKs. They stay entirely local; run them from the repo root:
 
 ```bash
 uv run --with google-genai python tests/smoke/google_smoke.py
@@ -45,9 +48,10 @@ A request enters `api/server.py`, is identified and normalized, checked in `core
 - `state.PROJECT_ROOT` is `parents[3]` from `src/mockingbird/core/state.py`. Moving the package deeper or shallower breaks `run`, hook install, updates and selftest. Keep the `src/mockingbird/<subpackage>/` depth.
 - `pyproject.toml` supplies the standard src layout and console script, but `install.sh` is the supported install. `PROJECT_ROOT` assumes `bridge.py` sits three levels above `core/state.py`.
 - All mutable settings live in `src/mockingbird/core/state.py`; read them through the module (`from . import state`) and patch `state` in tests, never copy values into callers.
-- Tests are plain `unittest`. `tests/_bootstrap.py` puts `src/` on `sys.path`; import it before `mockingbird` in every test module. `tests/smoke/` deliberately has no `__init__.py`, so unit discovery skips it.
+- Tests are plain `unittest`. `tests/_bootstrap.py` puts `src/` on `sys.path`; import it before `mockingbird` in every test module. `tests/smoke/` deliberately has no `__init__.py`, so unit discovery skips it; its scripts add `src/` and `tests/` to `sys.path` themselves.
+- Cache and queue JSON go through `core/store.write` (temp file, `0600`, `os.replace`); don't write those files directly.
 - A user-level hook in `PYTHONPATH` can shadow the checkout. Tests load the root `mockingbird_hook.py` with `spec_from_file_location`; keep that pattern.
 - The hook is opt-in with `MOCKINGBIRD_ENABLED=1`; never enable it implicitly. Tests that exercise hook install must patch `Path.home()` / `HOOK_DIR`, not touch real shell files. Never write requests or keys to logs or the journal. Cache entries contain prompts and answers, and `--redact` disables caching.
 - Provider smokes must stay offline and deterministic: dummy keys, local fake stand-ins, and zero fresh generations during replay. Native Bedrock/Gemini are stand-in/replay only; `--real` returns 501 by design.
 - Keep the package stdlib-only and Python 3.9-compatible. Optional SDKs belong only in smoke commands.
-- The version is duplicated in `src/mockingbird/core/state.py`, `pyproject.toml`, `install.sh`, the README badge and `SKILL.md` metadata. `update()` rejects an installer whose `VERSION` does not match the release tag. Bump them together, and only tag `vX.Y.Z` when a release is requested.
+- The version is duplicated in `src/mockingbird/core/state.py`, `pyproject.toml`, `install.sh`, the README badge and `SKILL.md` metadata. `update()` rejects an installer whose `VERSION` does not match the release tag. Bump them together, add release notes to `CHANGELOG.md` (the tag workflow uses it as the release body), and only tag `vX.Y.Z` when a release is requested.
