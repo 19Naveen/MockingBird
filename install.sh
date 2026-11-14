@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Install mockingbird.
-#   curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.11.0/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.12.0/install.sh | bash
 # Env: MOCKINGBIRD_BASE    (raw URL to download from; defaults to this release's tag)
 #      MOCKINGBIRD_SRC     (local folder to copy from instead of downloading)
 #      MOCKINGBIRD_NO_HOOK (set to 1 to skip the hook, e.g. on any machine that runs production code)
 set -euo pipefail
 
 NAME=mockingbird
-VERSION=1.11.0
+VERSION=1.12.0
 REPO_URL=https://github.com/19Naveen/MockingBird
 BASE="${MOCKINGBIRD_BASE:-https://raw.githubusercontent.com/19Naveen/MockingBird/v$VERSION}"
-# One real copy in the shared skills folder (Codex and opencode read it); Claude Code gets a single link.
+# The skill lives only in the shared skills folder; nothing goes into agent-specific folders.
 DEST="$HOME/.agents/skills/$NAME"
 
 if [ -t 1 ]; then
@@ -75,33 +75,7 @@ ln -sfn "$DEST/bridge.py" "$HOME/.local/bin/$NAME"
 done_ "Command ${B}mockingbird${X} added to ~/.local/bin"
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) note "Add ~/.local/bin to your PATH to use it" ;; esac
 
-# Earlier versions linked the skill into each agent's own folder. The shared folder covers Codex and opencode now.
-for old in "$HOME/.codex/skills/$NAME" "$HOME/.config/opencode/skills/$NAME"; do
-  if [ -L "$old" ]; then rm "$old"; fi
-done
-agents=""
-if [ -d "$HOME/.claude" ]; then
-  link="$HOME/.claude/skills/$NAME"
-  mkdir -p "$HOME/.claude/skills"
-  if [ -e "$link" ] && [ ! -L "$link" ]; then
-    note "Claude Code: ~/.claude/skills/$NAME is a real folder, so it was left alone. Remove it and run this again."
-  else
-    ln -sfn "$DEST" "$link"
-    agents="Claude Code"
-  fi
-fi
-[ -d "$HOME/.codex" ] && agents="$agents${agents:+, }Codex"
-if [ -d "$HOME/.config/opencode" ]; then
-  agents="$agents${agents:+, }opencode"
-  mkdir -p "$HOME/.config/opencode/commands"   # so /mockingbird works in opencode too
-  cat > "$HOME/.config/opencode/commands/$NAME.md" <<'EOF'
----
-description: Run AI tests with LLM calls answered by a subagent. Args: model[effort] [test command]
----
-Load the `mockingbird` skill and follow it. Arguments: $ARGUMENTS
-EOF
-fi
-done_ "Skill in ~/.agents/skills${agents:+, available to $agents}"
+done_ "Skill in ~/.agents/skills, the shared folder Codex and opencode read"
 
 cat <<EOF
 

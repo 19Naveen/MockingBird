@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="v1.11.0" src="https://img.shields.io/badge/version-1.11.0-black">
+  <img alt="v1.12.0" src="https://img.shields.io/badge/version-1.12.0-black">
   <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-black">
   <img alt="zero dependencies" src="https://img.shields.io/badge/dependencies-0-black">
   <img alt="Claude Code, Codex, opencode" src="https://img.shields.io/badge/works%20with-Claude%20Code%20%7C%20Codex%20%7C%20opencode-black">
@@ -27,7 +27,7 @@ Your code doesn't change. Stop the server and everything goes back to the real A
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.11.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.12.0/install.sh | bash
 ```
 
 Then open a new terminal. The installer:
@@ -35,11 +35,11 @@ Then open a new terminal. The installer:
 1. Puts the tool in `~/.agents/skills/mockingbird` and runs its self-check.
 2. Adds the `mockingbird` command to `~/.local/bin`.
 3. Installs the **hook**: one marked `PYTHONPATH` line in `~/.bashrc` and `~/.zshrc`. It lets every Python app you start from a terminal be switched to mockingbird, with no per-project setup.
-4. Puts the skill in the shared folder `~/.agents/skills`, which Codex and opencode read, and adds one link in `~/.claude/skills` for Claude Code.
+4. Puts the skill in the shared folder `~/.agents/skills`, which Codex and opencode read. Nothing goes into agent-specific folders.
 
 On a machine that runs production code, skip the hook: `curl -fsSL … | MOCKINGBIRD_NO_HOOK=1 bash`.
 
-The URL is pinned to the `v1.11.0` tag, so a later push to `main` can't change what it installs. Read `install.sh` before you pipe it to bash.
+The URL is pinned to the `v1.12.0` tag, so a later push to `main` can't change what it installs. Read `install.sh` before you pipe it to bash.
 
 ## Use
 
@@ -112,7 +112,7 @@ The screenshots come from a real run of the demo test suite.
 /mockingbird haiku                         # effort defaults to medium
 ```
 
-The agent starts the server, routes your app to it, runs the tests, reports the results and cleans up. In Codex, type `$mockingbird` instead of `/mockingbird`. The full steps are in [SKILL.md](SKILL.md).
+The agent starts the server, routes your app to it, runs the tests, reports the results and cleans up. Codex and opencode find the skill in `~/.agents/skills`; in Codex, type `$mockingbird`. Claude Code doesn't read that folder, so there, run the `mockingbird` command yourself. The full steps are in [SKILL.md](SKILL.md).
 
 ## How it works
 

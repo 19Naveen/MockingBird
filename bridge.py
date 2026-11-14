@@ -38,7 +38,7 @@ JOURNAL = None  # dashboard.Journal while `serve` runs: every call, on disk, for
 PROJECT = Path.cwd().name  # the folder the server runs in, shown per call
 QUIET = False  # True while the dashboard owns the terminal
 
-VERSION = "1.11.0"
+VERSION = "1.12.0"
 STATE = Path.home() / ".mockingbird" / "active.json"  # exists only while `serve` runs; the hook reads it
 CLAUDE_CMD = ('claude -p --model {m} --effort {e} --tools "" --system-prompt "You stand in for an LLM API. '
               'Follow the instructions in the user message exactly." --strict-mcp-config --disable-slash-commands '

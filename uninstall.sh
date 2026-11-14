@@ -27,7 +27,7 @@ if [ -f "$HOME/.mockingbird/active.json" ]; then
 fi
 
 echo "This removes the mockingbird command, the hook line in ~/.bashrc and ~/.zshrc,"
-echo "and the skill for Claude Code, Codex and opencode."
+echo "and the skill in ~/.agents/skills."
 if [ "$PURGE" = 1 ]; then
   echo "It also deletes your call history and saved answers in $STATE_DIR."
 else
@@ -59,14 +59,10 @@ for name in sys.argv[1:]:
 PY
 
 rm -rf "$HOME/.mockingbird"
-for link in "$HOME/.claude/skills/$NAME" "$HOME/.codex/skills/$NAME" "$HOME/.config/opencode/skills/$NAME" \
-            "$HOME/.local/bin/$NAME"; do
-  if [ -L "$link" ]; then
-    rm "$link"
-    echo "removed $link"
-  fi
-done
-rm -f "$HOME/.config/opencode/commands/$NAME.md"
+if [ -L "$HOME/.local/bin/$NAME" ]; then
+  rm "$HOME/.local/bin/$NAME"
+  echo "removed ~/.local/bin/$NAME"
+fi
 rm -rf "$DEST"
 if [ "$PURGE" = 1 ]; then
   rm -rf "$STATE_DIR"
