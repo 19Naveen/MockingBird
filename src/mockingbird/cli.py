@@ -393,6 +393,7 @@ def selftest():
     assert s == 502 and "exited 3" in b and len(list(state.CACHE.glob("*.json"))) == 1, (s, b)
 
     # cache tab: entries carry what was asked and how often they were replayed; v1.6 files still replay
+    wait_for_calls(7)  # `used` is counted from journal records, which trail their responses
     entries = dashboard.cache_entries(state.CACHE, state.JOURNAL.calls())
     assert len(entries) == 1 and entries[0].asked == "hi" and entries[0].used == 1, entries
     assert entries[0].answer == "auto:False" and not entries[0].legacy, entries
