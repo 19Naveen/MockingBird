@@ -358,6 +358,21 @@ assert asyncio.run(httpx.AsyncClient().send(Request())) == "127.0.0.1"
         with self.assertRaises(socket.timeout):
             urllib.request.urlopen(request, timeout=0.02)
 
+    def test_http_body_size_and_length_are_validated_before_reading(self):
+        import http.client
+        from urllib.parse import urlsplit
+        url = urlsplit(self.server())
+        for size, expected in ((str(33 * 1024 * 1024), 413), ("-1", 400), ("invalid", 400)):
+            with self.subTest(size=size):
+                connection = http.client.HTTPConnection(url.hostname, url.port, timeout=2)
+                try:
+                    connection.request("POST", "/v1/messages", body=b"", headers={"Content-Length": size})
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, expected)
+                    response.read()
+                finally:
+                    connection.close()
+
     def test_runner_cleans_up_after_interrupt(self):
         import signal
         env = {k: v for k, v in os.environ.items() if not k.startswith("BRIDGE_")}
