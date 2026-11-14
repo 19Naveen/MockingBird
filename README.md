@@ -31,7 +31,7 @@ Your application code doesn't change. Route only the test process to the bridge 
 - **No extra API spend:** fresh answers come from the Claude Code, Codex or opencode plan you already have.
 - **No code changes:** route only the test process with SDK base URLs, in any language; the optional Python hook catches hard-coded provider URLs.
 - **Deterministic record and replay:** identical requests return saved answers; CI needs no model login, API key or network. A replay miss fails fast with HTTP `409`.
-- **Five provider surfaces:** Anthropic Messages, OpenAI Chat Completions, Azure OpenAI/Foundry, Gemini/Vertex AI and Amazon Bedrock Converse, including SSE streaming, tool calls and image/PDF inputs.
+- **Five provider surfaces:** Anthropic Messages, OpenAI Chat Completions, Azure OpenAI/Foundry, Gemini/Vertex AI and Amazon Bedrock Converse, including SSE streaming, tool calls and image, text and PDF inputs.
 - **Real-API caching:** `--real` replays unchanged steps and forwards only new or changed calls with your own keys.
 - **Fault injection:** `--faults` scripts rate limits, outages, latency and malformed bodies without touching application code.
 - **Stdlib only:** Python 3.9+, zero runtime dependencies, and a live terminal dashboard.
@@ -126,7 +126,7 @@ The hook does not patch `httpx` or `httpx2` unless the process starts with `MOCK
 
 ## Which model answers
 
-mockingbird answers through an AI plan you already have, using that plan's own command-line tool. You need no API key and pay no API bills. With no `--model`, it uses the first tool it finds:
+mockingbird answers through a CLI you already have configured, using its own login or provider. It needs no separate API key. With no `--model`, it uses the first tool it finds:
 
 | You have | mockingbird runs | Model it uses |
 |---|---|---|
