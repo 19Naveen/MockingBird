@@ -1,5 +1,7 @@
 name: tests
 on: [push, pull_request]
+permissions:
+  contents: read
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -12,5 +14,32 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - name: Install optional PDF renderer
+        if: matrix.python == '3.14'
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
       - run: python -m unittest discover -s tests -v
       - run: bash -n install.sh uninstall.sh
+  providers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install provider SDKs
+        run: python -m pip install --quiet google-genai azure-ai-inference aiohttp openai anthropic boto3
+      - run: python tests/google_smoke.py
+      - run: python tests/foundry_smoke.py
+      - run: python tests/bedrock_smoke.py
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [test, providers]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish tested version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --title "mockingbird $GITHUB_REF_NAME" --notes-file CHANGELOG.md
