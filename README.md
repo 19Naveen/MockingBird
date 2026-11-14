@@ -14,11 +14,11 @@
 <p align="center">
   <img alt="v1.14.0" src="https://img.shields.io/badge/version-1.14.0-black">
   <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-black">
-  <img alt="zero dependencies" src="https://img.shields.io/badge/dependencies-0-black">
+  <img alt="zero Python dependencies" src="https://img.shields.io/badge/Python_dependencies-0-black">
   <img alt="Claude Code, Codex, opencode" src="https://img.shields.io/badge/works%20with-Claude%20Code%20%7C%20Codex%20%7C%20opencode-black">
 </p>
 
-Your app's AI features call Anthropic or OpenAI. In tests, that costs money, needs keys, and gives a different answer every run. mockingbird catches those calls on your machine, lets Claude Code, Codex or opencode answer through your existing login, and saves successful answers. Repeating the same request replays the saved content.
+Your app's AI features call Anthropic, OpenAI, Azure AI Foundry, Amazon Bedrock or Google Gemini. In tests, that costs money, needs keys, and gives a different answer every run. mockingbird catches those calls on your machine, lets Claude Code, Codex or opencode answer through your existing login, and saves successful answers. Repeating the same request replays the saved content.
 
 Your application code doesn't change. Route only your test process to the bridge using SDK environment variables or the optional hook.
 
@@ -52,6 +52,14 @@ The curl command downloads the installer and files from `main`, so it follows re
 ## Use
 
 ```bash
+mockingbird run --model codex -- pytest
+```
+
+`run` starts a private bridge on a free port, routes only the command and its children, then stops it and returns the command's exit code. It sets SDK base URLs and dummy keys, and loads the opt-in Python hook for hard-coded provider URLs. It needs no installed hook, shell-file changes, or separate terminal. `run --real -- pytest` keeps your own API keys. Ctrl-C also stops the command and bridge; CLI subprocesses are cleaned up with the bridge.
+
+For a persistent dashboard and manual test runs:
+
+```bash
 mockingbird serve --model codex   # uses your configured Codex model
 
 # In another terminal: route only this test process, with dummy keys.
@@ -60,6 +68,19 @@ OPENAI_BASE_URL=http://127.0.0.1:8787/v1 OPENAI_API_KEY=bridge-dummy pytest
 ```
 
 With these base URLs, stopping the server makes tests fail to connect. Remove the variables to return to the real API. For Azure, set `AZURE_OPENAI_ENDPOINT=http://127.0.0.1:8787` and `AZURE_OPENAI_API_KEY=bridge-dummy`.
+
+Native provider SDKs use their own endpoints:
+
+| Provider surface | Route the SDK calls | Test-process environment |
+|---|---|---|
+| Azure AI Foundry (OpenAI v1 and Azure Inference) | `/openai/v1/...`, `/models/...` | `AZURE_AI_ENDPOINT=http://127.0.0.1:8787/models` or `OPENAI_BASE_URL=http://127.0.0.1:8787/openai/v1` |
+| Azure AI Foundry (Anthropic) | `/anthropic/v1/messages` | `ANTHROPIC_FOUNDRY_BASE_URL=http://127.0.0.1:8787/anthropic` |
+| Gemini Developer API | `/v1beta/models/<model>:generateContent` | `GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787` |
+| Vertex AI Gemini | `/v1/projects/.../publishers/google/models/...` | `GOOGLE_VERTEX_BASE_URL=http://127.0.0.1:8787` |
+| Amazon Bedrock Runtime | `/model/<model>/converse`, `/converse-stream` | `AWS_ENDPOINT_URL_BEDROCK_RUNTIME=http://127.0.0.1:8787` |
+
+Set the matching dummy key as well: `ANTHROPIC_FOUNDRY_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` to `bridge-dummy`. For Bedrock, set `AWS_EC2_METADATA_DISABLED=true` so boto3 does not look for instance credentials. Vertex AI uses Application Default Credentials: the opt-in hook supplies dummy credentials while the bridge runs; without the hook, pass a dummy token in the test client. `mockingbird run` sets all of these for the child command.
+
 
 If your app hard-codes its provider URL, use an optional hook in its Python environment:
 
@@ -72,11 +93,14 @@ The hook does not patch `httpx` or `httpx2` unless the process starts with `MOCK
 
 | Command | What it does |
 |---|---|
+| `run [serve options] -- COMMAND` | Runs a command against its own temporary bridge, then cleans up |
 | `serve` | Starts the server and the dashboard. Sonnet answers, at medium effort |
 | `serve --real` | Uses the real API with your own keys, and replays any call it has seen before ([below](#real-api-with-repeats-replayed)) |
 | `serve --model opus[max]` | Picks the model and effort, such as `sonnet[high]` or `haiku` |
 | `serve --plain` | Logs plain lines instead of drawing the dashboard (automatic with no terminal) |
 | `serve --redact` | Disables disk cache reads/writes and hides model, project and error details in new history and logs |
+| `serve --replay --model codex` | Replays recorded Codex answers offline; a miss returns HTTP 409 |
+| `serve --faults faults.json` | Applies an explicit sequence of errors, delays or malformed responses |
 | `serve --agent` | Lets a coding agent's subagents answer instead (see [SKILL.md](SKILL.md)) |
 | `stats` | Prints the analytics for every call so far |
 | `cache` | Lists the saved answers |
@@ -102,16 +126,84 @@ To choose, pass `--model`: `sonnet[high]`, `opus[max]`, `haiku`, `codex`, `gpt-5
 
 The default prefers Claude Code when installed, then Codex, then opencode. Use `--model codex` to choose Codex explicitly. Codex runs with `--ephemeral --sandbox read-only`, using its configured model. These flags avoid session persistence and restrict filesystem writes; they do not make untrusted requests safe. See the [official Codex non-interactive documentation](https://learn.chatgpt.com/docs/non-interactive-mode).
 
-**Previously tested with opencode** 2.3.0 and its default model on 14/11/2026: six demo tests covering tool loops, JSON mode and streaming passed, with the second run replaying in under a second. The reproducible Codex SDK check is in [tests/codex_smoke.py](tests/codex_smoke.py); results are recorded below.
+The reproducible live checks are in [tests/sdk_smoke.py](tests/sdk_smoke.py). They cover both official SDKs, async clients and streams, streamed tool calls, tool-result loops, Azure deployment routes, eight concurrent identical requests, image recognition, text files and rendered PDFs. Each suite runs again in offline replay mode; it fails if any fresh generation is attempted.
 
-**Tested with Codex** CLI 0.169.0 on 14/11/2026, using its configured default model, Python 3.13.11, `anthropic` 2.8.0 and `openai` 3.51.0. All six SDK tests passed: Anthropic text and streaming, OpenAI JSON and streaming, and forced tool calls followed by a tool-result turn for each provider.
+**Tested on 14/11/2026**, using Python 3.13.11, `anthropic` 2.8.0 and `openai` 3.51.0:
 
-| Codex SDK check | Result | Time |
+| SDK check | First run | Offline replay |
 |---|---|---|
-| Empty cache, 8 SDK requests | 6 fresh generations, 2 replays; 6/6 tests passed | 43.23 s |
-| Same suite again, 8 SDK requests | All replayed, zero Codex invocations; 6/6 tests passed | 0.02 s |
+| Codex CLI 0.169.0, configured default model | 17/17 tests, 14 generations, 106.69 s | 17/17 tests, 0 generations, 0.08 s |
+| opencode 2.3.0, `openai/gpt-6.1-sol` | 17/17 tests, 14 generations, 40.20 s | 17/17 tests, 0 generations, 0.09 s |
+| Claude Code 2.1.325 | Blocked: no active login; shell model overrides are unrecognized | Pending |
 
-These checks use SDK base URLs. Hook activation and isolation are covered separately by the regression suite. They verify these common SDK paths, not every API feature or SDK version.
+These checks use SDK base URLs. Hook activation and runner isolation are covered separately by the regression suite. They verify these common SDK paths, not every API feature or SDK version.
+
+Provider-native checks also run entirely against local fake stand-ins and need no cloud login or credentials:
+
+| Check | Command | Result on 14/11/2026 |
+|---|---|---|
+| Gemini Developer API and Vertex AI | `uv run --with google-genai python tests/google_smoke.py` | 8/8 fresh and 8/8 replay for each mode, with 0 generations in replay (`google-genai` 3.3.0) |
+| Azure AI Foundry | `uv run --with azure-ai-inference --with aiohttp --with openai --with anthropic python tests/foundry_smoke.py` | 9/9 fresh and 9/9 replay, sync and async, hard-coded host redirects, and 5 runner-routed SDK calls |
+| Amazon Bedrock | `uv run --with boto3 python tests/bedrock_smoke.py` | Converse, ConverseStream, tool loops, native throttling errors and runner routing passed with environment and hard-coded endpoints (`boto3` 1.44.3) |
+
+Opencode's default text model passed the original 11 text/SDK tests but failed image/PDF checks. Selecting a vision-capable model made all 17 tests pass; the bridge cannot add vision to a text-only stand-in.
+
+## Offline replay and CI
+
+Record once, then replay with the same model selection and namespace:
+
+```bash
+BRIDGE_CACHE=./fixtures mockingbird run --model codex -- pytest
+BRIDGE_CACHE=./fixtures mockingbird run --replay --model codex -- pytest
+```
+
+The second command needs no model CLI, login or provider network access. A cache miss returns HTTP **409** immediately, without generating an answer or forwarding to a real API. `--real --replay` replays real-response fixtures only. Replay requires a cache and cannot be combined with `--redact`. Review fixtures for private data before committing them; the cache's `.gitignore` excludes them by default.
+
+Keys include the API, selected CLI command, explicit model/effort, and `BRIDGE_NAMESPACE`. To invalidate fixtures when changing a CLI's configured default model, set a new namespace (for example `BRIDGE_NAMESPACE=codex-default-v2`), or use an explicit `--model`. Old stand-in caches without backend identity stay viewable but are not automatically replayed by v1.14.
+
+## Scripted failures
+
+Fault simulation is **off by default**. Enable it only for the test run that needs it:
+
+```bash
+mockingbird run --model codex --faults faults.json -- pytest
+```
+
+Example `faults.json`:
+
+```json
+[
+  {"status": 429, "error": "rate limited"},
+  {"status": 503, "error": "temporarily unavailable"},
+  {"delay": 2},
+  {"body": "not valid JSON"}
+]
+```
+
+Each incoming API request consumes one step, including SDK retries. A delay-only step waits then proceeds normally; a `status`/`error` step returns a provider-shaped error; `body` sends that literal string as JSON content (status 200 unless overridden). Injected responses never enter the cache. After the list ends, behavior is normal; starting a new run resets the sequence. Parallel requests consume steps in arrival order, so use an isolated sequential test when order matters. Delays are bounded by `BRIDGE_TIMEOUT`.
+
+This simulates your application's error handling. It does not enforce requests-per-minute quotas or cause actual provider throttling. Faults run before cache lookup and real forwarding; with `--replay`, cache misses still never reach a model or upstream.
+
+## Image and file inputs
+
+Stand-in requests can include real image/document content, not just text descriptions:
+
+| SDK input | Supported form |
+|---|---|
+| Anthropic image blocks | `source.type=base64`, with PNG, JPEG, GIF or WebP data |
+| OpenAI Chat Completions images | `image_url.url` containing a base64 `data:image/...` URL |
+| Anthropic documents | UTF-8 `source.type=text`, or base64 text/PDF data |
+| OpenAI Chat Completions files | Inline `file.file_data` (base64 or data URL), with `filename` identifying text/PDF type |
+| Gemini `inlineData` | Base64 data with a `mimeType`, in camelCase or Vertex snake_case form |
+| Bedrock content blocks | Inline `image` or `document` with `source.bytes` or `source.text` |
+
+Text files are decoded into the stand-in prompt. Image files are passed through Codex's image flag, opencode's file attachments, or Claude's structured image input. In agent mode, numbered temporary image paths are exposed for the answering agent to inspect. The selected model must support image input; a text-only model is insufficient even if the application requested a vision model.
+
+PDFs are rendered into page images so scanned pages and diagrams are visible too. Install **Poppler** (`poppler` on Arch/macOS, `poppler-utils` on Debian/Ubuntu) for `pdfinfo` and `pdftoppm`. Rendering fits pages to 1568 pixels; tiny text may lose detail. Missing Poppler returns a clear 501 response. No Python packages are needed at runtime. See [Claude's image input](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode) and [opencode's attachment requirements](https://opencode.ai/docs/attachments).
+
+Limits: 32 MiB request body, 20 MiB per decoded file and combined images, and 20 images/PDF pages per request. Excess input is rejected rather than truncated. Temporary media is private and removed after success, failure or timeout. Cache keys include the original attachment bytes, so offline replay needs neither a model nor the PDF renderer.
+
+Stand-in mode does not fetch remote URLs, read filesystem paths supplied in request JSON, resolve provider `file_id` references, or emulate `/files` uploads. Send inline data; unsupported references get clear errors. Office documents, audio and video are unsupported. `--real` forwards original requests unchanged to supported provider endpoints, leaving their own attachment handling intact.
 
 ## Real API, with repeats replayed
 
@@ -121,11 +213,13 @@ Working on one stage of a pipeline that calls a real model? Run:
 mockingbird serve --real
 ```
 
-Route the test process to the bridge using the base URLs above or the opted-in hook, but keep your real API keys for this mode. mockingbird sits in front of the real Anthropic, OpenAI or Azure OpenAI API:
+Route the test process to the bridge using the base URLs above or the opted-in hook, but keep your real API keys for this mode. mockingbird sits in front of the real Anthropic, OpenAI, Azure OpenAI or Foundry endpoint:
 
 - A call that's identical to an earlier one is **replayed** from the cache: instant, and no API cost.
 - A call that's new or changed goes to the **real API** with your key, and the answer is saved for next time.
 - Errors (401, 429, 500…) go straight back to your app and are never saved, so its own retries work as usual.
+
+Native Bedrock and Gemini are stand-in/replay only: `--real` returns a clear 501 for those routes instead of forwarding them. For Foundry or a custom Azure host, set `BRIDGE_UPSTREAM_OPENAI` (and `BRIDGE_UPSTREAM_ANTHROPIC` for the Anthropic Foundry path) so the bridge knows where to forward, or enable the hook so it records the original host.
 
 For example, say a pipeline makes 10 calls and you're editing the prompt in call 5. On the next run, calls 1 to 4 are replayed and call 5 goes to the real API. Calls 6 to 10 usually go too, because their input includes call 5's new answer. Replaying them would feed old answers downstream.
 
@@ -173,7 +267,7 @@ The agent starts the server, routes your app to it, runs the tests, reports the 
 ## How it works
 
 ```
- your app (unchanged) ── Anthropic / OpenAI / Azure SDK
+ your app (unchanged) ── Anthropic / OpenAI / Azure / Bedrock / Gemini SDK
         │
         │  optional hook: opted in AND server running?
         ├── no  ─► the real API
@@ -192,7 +286,7 @@ The agent starts the server, routes your app to it, runs the tests, reports the 
 
 - **Saved answers** live in `~/.local/state/mockingbird/cache/`, one cache for all projects. Delete one on the Cache tab, or all of them with `mockingbird cache --purge`. `BRIDGE_CACHE=off` turns the cache off. `BRIDGE_CACHE=./fixtures` keeps a separate cache in that folder, for example to commit for CI.
 - **Call history** lives in `~/.local/state/mockingbird/calls.db`. It powers the dashboard and keeps only metadata: time, model, outcome, duration, project, and tool names. It never stores prompts or answers.
-- Cache filenames are SHA-256 hashes of the full request JSON, excluding `stream` in stand-in mode. They do not contain the request JSON. Each cache entry does contain the first 500 characters of the last user message and the **full answer in plaintext**. Newly written cache/queue files use owner-only permissions (`0600`).
+- Cache filenames are SHA-256 hashes of the request and backend identity, excluding `stream` in stand-in mode. They do not contain the request JSON. Each cache entry does contain the first 500 characters of the last user message and the **full answer in plaintext**. Newly written cache/queue files use owner-only permissions (`0600`).
 - Concurrent identical successful requests within one server share one generation, including with `BRIDGE_PARALLEL`. Real mode also coalesces successful misses; streamed and plain real responses use separate entries. Separate server processes do not share locks: give them separate `BRIDGE_CACHE` directories. Failed requests are not cached or coalesced into future successes.
 - Replay preserves saved answer content and tool IDs. Response envelope IDs and timestamps can differ. Purging or disabling the cache, changing the request, or using a different empty cache generates a fresh answer. Use deterministic test inputs instead of timestamps or random IDs when repeatability matters.
 
@@ -212,8 +306,8 @@ Measured on 14/11/2026: a demo app using the official `anthropic` and `openai` S
 | What | What happens |
 |---|---|
 | Answers come from a stand-in model | Fresh answers vary and only imitate your real model. Test your app's flow and parsing, not answer quality |
-| Unsupported endpoints | Responses API, `count_tokens`, embeddings, Gemini, Bedrock and Vertex get a clear 501 error |
-| Unusual requests | Images arrive as data the model can't see, very long contexts can overflow it, and token usage is always 0 |
+| Unsupported endpoints | Responses API, `count_tokens`, embeddings, Gemini built-in tools, Bedrock managed prompts/S3 references, and provider file-upload endpoints get a clear 501 error. Native Bedrock and Gemini routes are not forwarded by `--real` |
+| Unusual requests | Inline images and text/PDF files are supported as described above; long contexts can still overflow the selected model, and token usage is always 0 |
 | Exact SDK/provider fidelity | Stand-in mode supplies common fields with zero usage, emits text/tool arguments in coarse chunks, and does not generate native thinking blocks. `raw` answers can supply full response bodies, but streaming still uses the bridge's event builder. `--real` preserves upstream body/usage/SSE bytes, buffering the response before delivery; it does not preserve chunk timing or all HTTP headers |
 | Calls that change every run | Requests containing timestamps or random ids never match a saved answer, so they're always asked fresh |
 | Apps not started from a terminal | Set SDK base URLs in the test process, or install a hook in that Python environment and start the process with `MOCKINGBIRD_ENABLED=1` |
@@ -232,17 +326,29 @@ python3 -m unittest discover -s tests -v
 bash -n install.sh uninstall.sh
 ```
 
-Named regression tests cover hook opt-in and upgrade, parsing and validation, concurrent cache misses in both modes, redaction, atomic private files, release-pinned updates, and the legacy self-check. GitHub Actions is configured to run them on Python 3.9–3.14 without model access. Installation only checks startup; it no longer runs network/listener tests on the user's machine.
+Named regression tests cover hook opt-in and upgrade, parsing and validation, native Bedrock/Foundry/Gemini adapters, cache isolation, offline replay, faults and timeouts, runner cleanup, concurrent cache misses in both modes, redaction, atomic private files, release-pinned updates, and the legacy self-check. GitHub Actions runs them on Python 3.9–3.14 without model access. Installation only checks startup; it does not run listener tests on the user's machine.
 
-Local verification on 14/11/2026: all 16 regression tests passed on Python 3.9.25 and 3.14. The GitHub Actions matrix has not been run for this unpublished checkout.
+The release workflow runs only on a version-tag push, after the full test matrix succeeds. Ordinary commits run tests and never create releases. See [CHANGELOG.md](CHANGELOG.md).
 
-To repeat the live Codex check (requires a logged-in Codex CLI and consumes plan usage):
+To repeat the live checks (requires each selected CLI's login/provider setup and consumes plan usage):
 
 ```bash
-uv run --with anthropic --with openai python tests/codex_smoke.py
+uv run --with anthropic --with openai python tests/sdk_smoke.py --model sonnet
+uv run --with anthropic --with openai python tests/sdk_smoke.py --model codex
+uv run --with anthropic --with openai python tests/sdk_smoke.py --model opencode
+# For images/PDFs, choose a configured vision-capable model explicitly, for example:
+uv run --with anthropic --with openai python tests/sdk_smoke.py --model opencode/openai/gpt-6.1-sol
 ```
 
-It uses dummy SDK keys, an isolated temporary bridge/cache, and both official SDKs. The second pass fails if it attempts any fresh generation. Live checks are opt-in and excluded from CI.
+Provider SDK checks use deterministic local answers (no CLI, login or cloud credentials):
+
+```bash
+uv run --with google-genai python tests/google_smoke.py
+uv run --with azure-ai-inference --with aiohttp --with openai --with anthropic python tests/foundry_smoke.py
+uv run --with boto3 python tests/bedrock_smoke.py
+```
+
+They use dummy SDK keys, isolated temporary bridges/caches, and official SDKs. Each replay pass fails if it attempts any fresh generation. The CLI live checks are opt-in and excluded from CI; the provider SDK checks run in CI with deterministic local answers.
 
 Licensed under [MIT](LICENSE).
 
