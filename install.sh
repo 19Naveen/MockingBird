@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Install mockingbird.
-#   curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.13.0/install.sh | bash
-# Env: MOCKINGBIRD_BASE    (raw URL to download from; defaults to this release's tag)
+#   curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/main/install.sh | bash
+# Env: MOCKINGBIRD_BASE    (raw URL to download from; defaults to main; update pins it to a release tag)
 #      MOCKINGBIRD_SRC     (local folder to copy from instead of downloading)
-#      MOCKINGBIRD_NO_HOOK (set to 1 to skip the hook, e.g. on any machine that runs production code)
+#      MOCKINGBIRD_INSTALL_HOOK (set to 1 to install the optional, opt-in shell hook)
 set -euo pipefail
 
 NAME=mockingbird
-VERSION=1.13.0
+VERSION=1.14.0
 REPO_URL=https://github.com/19Naveen/MockingBird
-BASE="${MOCKINGBIRD_BASE:-https://raw.githubusercontent.com/19Naveen/MockingBird/v$VERSION}"
+BASE="${MOCKINGBIRD_BASE:-https://raw.githubusercontent.com/19Naveen/MockingBird/main}"
 # The skill lives only in the shared skills folder; nothing goes into agent-specific folders.
 DEST="$HOME/.agents/skills/$NAME"
 
@@ -39,7 +39,7 @@ EOF
 
 mkdir -p "$DEST"
 doing "Downloading"
-for f in SKILL.md bridge.py dashboard.py mockingbird_hook.py uninstall.sh; do
+for f in SKILL.md bridge.py dashboard.py mockingbird_hook.py uninstall.sh LICENSE; do
   if [ -n "${MOCKINGBIRD_SRC:-}" ]; then
     cp "$MOCKINGBIRD_SRC/$f" "$DEST/$f.tmp"
   elif ! curl -fsSL --connect-timeout 15 --max-time 120 --retry 2 "$BASE/$f" -o "$DEST/$f.tmp"; then
@@ -52,14 +52,12 @@ chmod +x "$DEST/bridge.py" "$DEST/uninstall.sh"
 done_ "Downloaded"
 
 # Child steps get no stdin: under `curl | bash` stdin is the rest of this script, and nothing may wait on a key.
-doing "Running the self-check"
-limit=""
-command -v timeout >/dev/null && limit="timeout 180"
-$limit python3 "$DEST/bridge.py" selftest </dev/null >/dev/null 2>&1 \
-  || fail "The self-check failed. See why with: python3 $DEST/bridge.py selftest"
-done_ "Self-check passed"
+doing "Checking Python compatibility"
+python3 "$DEST/bridge.py" version </dev/null \
+  || fail "Could not start mockingbird. Python 3.9 or newer is required."
+done_ "Startup check passed (the test suite runs in CI)"
 
-if [ -z "${MOCKINGBIRD_NO_HOOK:-}" ]; then
+if [ "${MOCKINGBIRD_INSTALL_HOOK:-}" = 1 ] && [ -z "${MOCKINGBIRD_NO_HOOK:-}" ]; then
   python3 "$DEST/bridge.py" hook install </dev/null >/dev/null
   shells=""
   for rc in .bashrc .zshrc; do
@@ -67,7 +65,11 @@ if [ -z "${MOCKINGBIRD_NO_HOOK:-}" ]; then
   done
   done_ "Hook added to ${shells:-your shell}"
 else
-  note "Hook skipped (MOCKINGBIRD_NO_HOOK is set)"
+  # Refresh any older global hook so an upgrade also gets the opt-in guard.
+  if [ -f "$HOME/.mockingbird/hook/sitecustomize.py" ]; then
+    python3 "$DEST/bridge.py" hook install </dev/null >/dev/null
+  fi
+  note "Hook is optional; use SDK base URLs, or run mockingbird hook install"
 fi
 
 mkdir -p "$HOME/.local/bin"
@@ -87,9 +89,9 @@ done_ "Skill in ~/.agents/skills, the shared folder Codex and opencode read"
 cat <<EOF
 
   ${B}Next${X}
-    1. Open a new terminal
-    2. Run ${B}mockingbird serve${X}
-    3. Run your app or its tests in another terminal
+    1. Run ${B}mockingbird serve${X}
+    2. Point your test SDK base URL at http://127.0.0.1:8787 (OpenAI: /v1)
+    3. Run your tests with a dummy API key (see README)
 
   ${D}Docs  $REPO_URL${X}
 

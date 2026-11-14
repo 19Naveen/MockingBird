@@ -1,6 +1,6 @@
 """mockingbird hook, loaded at Python startup by mockingbird_hook.pth in one environment (venv).
 
-While `bridge.py serve` runs on this machine, httpx calls from this environment to the Anthropic, OpenAI and
+With MOCKINGBIRD_ENABLED=1, while `bridge.py serve` runs, httpx calls from this environment to the Anthropic, OpenAI and
 Azure OpenAI APIs go to the bridge instead. When the bridge stops, calls go to the real API again, even in a
 process that is already running. Covers the official `anthropic` and `openai` SDKs and anything built on them.
 Install or remove it with `bridge.py hook install|uninstall <python>`. Never install it in a production environment.
@@ -28,6 +28,8 @@ def bridge_port():
 
 def _redirect(request):
     global _announced
+    if os.environ.get("MOCKINGBIRD_ENABLED") != "1":
+        return
     host = request.url.host
     if host not in HOSTS and not host.endswith(".openai.azure.com"):
         return
@@ -88,9 +90,10 @@ class _PatchOnImport:
 
 
 try:
-    for _name in MODULES:
-        if _name in sys.modules:
-            _patch(sys.modules[_name])
-    sys.meta_path.insert(0, _PatchOnImport())
+    if os.environ.get("MOCKINGBIRD_ENABLED") == "1":
+        for _name in MODULES:
+            if _name in sys.modules:
+                _patch(sys.modules[_name])
+        sys.meta_path.insert(0, _PatchOnImport())
 except Exception as e:  # a broken hook must never break the app
     print(f"[mockingbird] hook disabled: {e!r}", file=sys.stderr)
