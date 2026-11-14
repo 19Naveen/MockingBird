@@ -126,7 +126,7 @@ To choose, pass `--model`: `sonnet[high]`, `opus[max]`, `haiku`, `codex`, `gpt-5
 
 The default prefers Claude Code when installed, then Codex, then opencode. Use `--model codex` to choose Codex explicitly. Codex runs with `--ephemeral --sandbox read-only`, using its configured model. These flags avoid session persistence and restrict filesystem writes; they do not make untrusted requests safe. See the [official Codex non-interactive documentation](https://learn.chatgpt.com/docs/non-interactive-mode).
 
-The reproducible live checks are in [tests/sdk_smoke.py](tests/sdk_smoke.py). They cover both official SDKs, async clients and streams, streamed tool calls, tool-result loops, Azure deployment routes, eight concurrent identical requests, image recognition, text files and rendered PDFs. Each suite runs again in offline replay mode; it fails if any fresh generation is attempted.
+The reproducible live checks are in [tests/smoke/sdk_smoke.py](tests/smoke/sdk_smoke.py). They cover both official SDKs, async clients and streams, streamed tool calls, tool-result loops, Azure deployment routes, eight concurrent identical requests, image recognition, text files and rendered PDFs. Each suite runs again in offline replay mode; it fails if any fresh generation is attempted.
 
 **Tested on 14/11/2026**, using Python 3.13.11, `anthropic` 2.8.0 and `openai` 3.51.0:
 
@@ -142,9 +142,9 @@ Provider-native checks also run entirely against local fake stand-ins and need n
 
 | Check | Command | Result on 14/11/2026 |
 |---|---|---|
-| Gemini Developer API and Vertex AI | `uv run --with google-genai python tests/google_smoke.py` | 8/8 fresh and 8/8 replay for each mode, with 0 generations in replay (`google-genai` 3.3.0) |
-| Azure AI Foundry | `uv run --with azure-ai-inference --with aiohttp --with openai --with anthropic python tests/foundry_smoke.py` | 9/9 fresh and 9/9 replay, sync and async, hard-coded host redirects, and 5 runner-routed SDK calls |
-| Amazon Bedrock | `uv run --with boto3 python tests/bedrock_smoke.py` | Converse, ConverseStream, tool loops, native throttling errors and runner routing passed with environment and hard-coded endpoints (`boto3` 1.44.3) |
+| Gemini Developer API and Vertex AI | `uv run --with google-genai python tests/smoke/google_smoke.py` | 8/8 fresh and 8/8 replay for each mode, with 0 generations in replay (`google-genai` 3.3.0) |
+| Azure AI Foundry | `uv run --with azure-ai-inference --with aiohttp --with openai --with anthropic python tests/smoke/foundry_smoke.py` | 9/9 fresh and 9/9 replay, sync and async, hard-coded host redirects, and 5 runner-routed SDK calls |
+| Amazon Bedrock | `uv run --with boto3 python tests/smoke/bedrock_smoke.py` | Converse, ConverseStream, tool loops, native throttling errors and runner routing passed with environment and hard-coded endpoints (`boto3` 1.44.3) |
 
 Opencode's default text model passed the original 11 text/SDK tests but failed image/PDF checks. Selecting a vision-capable model made all 17 tests pass; the bridge cannot add vision to a text-only stand-in.
 
@@ -321,22 +321,23 @@ Measured on 14/11/2026: a demo app using the official `anthropic` and `openai` S
 
 ## Repository layout
 
-`bridge.py` is the installed entry point; it adds this folder to `sys.path` and calls the package. The implementation lives in `mockingbird/`:
+`bridge.py` is the installed entry point; it adds `src/` to `sys.path` and calls the package. The implementation lives in `src/mockingbird/`, grouped by concern:
 
 | Path | Responsibility |
 | --- | --- |
-| `mockingbird/cli.py` | Command-line parsing, `run`, `update`, hook install, self-check |
-| `mockingbird/server.py` | HTTP shim, provider routing, real-upstream forwarding |
-| `mockingbird/answers.py` | Cache lookup and the auto/agent answer choice |
-| `mockingbird/agent.py` | Model specs, prompt rendering, queue/claim and subprocess runs |
-| `mockingbird/responses.py` | Anthropic and OpenAI response bodies and SSE |
-| `mockingbird/providers/` | Bedrock Converse and Gemini adapters |
-| `mockingbird/store.py` | Cache keys, atomic JSON files and text helpers |
-| `mockingbird/state.py` | Runtime settings shared by every module |
-| `mockingbird/dashboard.py` | Journal, analytics and live terminal dashboard |
-| `mockingbird/attachments.py` | Inline image, text and PDF handling |
+| `src/mockingbird/cli.py` | Command-line parsing, `run`, `update`, hook install, self-check |
+| `src/mockingbird/core/state.py` | Runtime settings shared by every module |
+| `src/mockingbird/core/store.py` | Cache keys, atomic JSON files and text helpers |
+| `src/mockingbird/core/log.py` | Terminal log lines |
+| `src/mockingbird/core/agent.py` | Model specs, prompt rendering, queue/claim and subprocess runs |
+| `src/mockingbird/core/answers.py` | Cache lookup and the auto/agent answer choice |
+| `src/mockingbird/api/server.py` | HTTP shim, provider routing, real-upstream forwarding |
+| `src/mockingbird/api/responses.py` | Anthropic and OpenAI response bodies and SSE |
+| `src/mockingbird/api/providers/` | Bedrock Converse and Gemini adapters |
+| `src/mockingbird/media/attachments.py` | Inline image, text and PDF handling |
+| `src/mockingbird/ui/dashboard.py` | Journal, analytics and live terminal dashboard |
 
-`mockingbird_hook.py` stays at the repository root because users copy or install it on its own. `install.sh` downloads the root entry point, the package files and the hook.
+`pyproject.toml` declares the same `src` layout and version. `mockingbird_hook.py` stays at the repository root because users copy or install it on its own. `install.sh` downloads the root entry point, `pyproject.toml`, the package files under `src/` and the hook. Tests live in `tests/`; the opt-in provider SDK checks are in `tests/smoke/`.
 
 ## Tests and license
 
@@ -352,19 +353,19 @@ The release workflow runs only on a version-tag push, after the full test matrix
 To repeat the live checks (requires each selected CLI's login/provider setup and consumes plan usage):
 
 ```bash
-uv run --with anthropic --with openai python tests/sdk_smoke.py --model sonnet
-uv run --with anthropic --with openai python tests/sdk_smoke.py --model codex
-uv run --with anthropic --with openai python tests/sdk_smoke.py --model opencode
+uv run --with anthropic --with openai python tests/smoke/sdk_smoke.py --model sonnet
+uv run --with anthropic --with openai python tests/smoke/sdk_smoke.py --model codex
+uv run --with anthropic --with openai python tests/smoke/sdk_smoke.py --model opencode
 # For images/PDFs, choose a configured vision-capable model explicitly, for example:
-uv run --with anthropic --with openai python tests/sdk_smoke.py --model opencode/openai/gpt-6.1-sol
+uv run --with anthropic --with openai python tests/smoke/sdk_smoke.py --model opencode/openai/gpt-6.1-sol
 ```
 
 Provider SDK checks use deterministic local answers (no CLI, login or cloud credentials):
 
 ```bash
-uv run --with google-genai python tests/google_smoke.py
-uv run --with azure-ai-inference --with aiohttp --with openai --with anthropic python tests/foundry_smoke.py
-uv run --with boto3 python tests/bedrock_smoke.py
+uv run --with google-genai python tests/smoke/google_smoke.py
+uv run --with azure-ai-inference --with aiohttp --with openai --with anthropic python tests/smoke/foundry_smoke.py
+uv run --with boto3 python tests/smoke/bedrock_smoke.py
 ```
 
 They use dummy SDK keys, isolated temporary bridges/caches, and official SDKs. Each replay pass fails if it attempts any fresh generation. The CLI live checks are opt-in and excluded from CI; the provider SDK checks run in CI with deterministic local answers.

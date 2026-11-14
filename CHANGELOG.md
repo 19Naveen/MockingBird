@@ -1,6 +1,6 @@
 # Unreleased
 
-- Split the implementation into the `mockingbird/` package: CLI, server, cache/answers, agent, response shaping, provider adapters and shared state. `bridge.py` remains the installed entry point and `mockingbird_hook.py` stays standalone. No command, environment variable or wire-format changes.
+- Moved the implementation into a standard `src/` layout with `pyproject.toml`, and grouped the package by concern (`core/`, `api/`, `providers/`, `media/`, `ui/`). `bridge.py` remains the installed entry point, `mockingbird_hook.py` stays standalone, and the opt-in provider checks moved to `tests/smoke/`. No command, environment variable or wire-format changes.
 
 # v1.14.0
 
