@@ -34,6 +34,10 @@ def _redirect(request):
     port = bridge_port()
     if port is None:
         return
+    # Where the call was really going (Azure hosts are per customer); `serve --real` forwards misses there.
+    original_port = request.url.port
+    request.headers["x-mockingbird-upstream"] = (f"{request.url.scheme}://{host}"
+                                                 + (f":{original_port}" if original_port else ""))
     request.url = request.url.copy_with(scheme="http", host="127.0.0.1", port=port)
     request.headers["host"] = f"127.0.0.1:{port}"
     if not _announced:

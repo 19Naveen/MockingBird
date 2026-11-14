@@ -52,7 +52,7 @@ REFRESH = 1.0
 MARGIN = 3
 PAGES = ("Live", "Analytics", "Cache")
 
-FRESH = ("FRESH", "AGENT")  # answered by the model just now (auto CLI, or a subagent)
+FRESH = ("FRESH", "AGENT", "LIVE")  # answered just now: auto CLI, a subagent, or the real API (--real)
 
 
 @dataclass
@@ -138,11 +138,47 @@ class CacheEntry:
     used: int = 0  # times it was replayed
     last_used: float | None = None
     legacy: bool = False  # saved before v1.7: the file holds only the answer
+    via: str = ""  # set for answers from the real API (serve --real): where they came from
 
 
 def cached_answer(data: dict) -> dict:
     """v1.7 files are {"meta", "answer"}; older ones are the bare answer."""
     return data["answer"] if "answer" in data and "meta" in data else data
+
+
+def http_answer_text(ctype: str, body: str) -> str:
+    """Readable text of a real API response (JSON or streamed), for the Cache tab."""
+    if "event-stream" in ctype:
+        parts = []
+        for line in body.splitlines():
+            if not line.startswith("data:"):
+                continue
+            try:
+                event = json.loads(line[5:].strip())
+            except ValueError:
+                continue
+            delta = event.get("delta")
+            if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                parts.append(delta.get("text", ""))
+            for choice in event.get("choices") or []:
+                parts.append((choice.get("delta") or {}).get("content") or "")
+        return "".join(parts) or "(streamed response)"
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return body[:2000]
+    if isinstance(data.get("content"), list):  # Anthropic
+        out = [b.get("text", "") for b in data["content"] if b.get("type") == "text"]
+        out += [f"→ calls {b.get('name')}({json.dumps(b.get('input', {}))})"
+                for b in data["content"] if b.get("type") == "tool_use"]
+        return "\n".join(o for o in out if o)
+    for choice in data.get("choices") or []:  # OpenAI and Azure
+        message = choice.get("message") or {}
+        out = [message.get("content") or ""]
+        out += [f"→ calls {t['function']['name']}({t['function'].get('arguments', '')})"
+                for t in message.get("tool_calls") or [] if "function" in t]
+        return "\n".join(o for o in out if o)
+    return json.dumps(data)[:2000]
 
 
 def answer_text(ans: dict) -> str:
@@ -170,13 +206,15 @@ def cache_entries(folder: Path | None, calls: Sequence[Call]) -> list[CacheEntry
             data = json.loads(f.read_text())
         except (OSError, ValueError):
             continue
-        meta = data.get("meta") if "answer" in data else None
-        ans = cached_answer(data)
+        meta = data.get("meta") if ("answer" in data or "http" in data) else None
+        http = data.get("http")
         out.append(CacheEntry(
             key=f.stem, saved=(meta or {}).get("saved") or f.stat().st_mtime, model=(meta or {}).get("model", "—"),
             project=(meta or {}).get("project", "—"), asked=(meta or {}).get("asked", "(saved before v1.7)"),
-            label=(meta or {}).get("label", ""), answer=answer_text(ans), size=f.stat().st_size,
-            used=used[f.stem], last_used=last.get(f.stem), legacy=meta is None))
+            label=(meta or {}).get("label", ""),
+            answer=http_answer_text(http["content_type"], http["body"]) if http else answer_text(cached_answer(data)),
+            size=f.stat().st_size, used=used[f.stem], last_used=last.get(f.stem), legacy=meta is None,
+            via=(meta or {}).get("via", "") if http else ""))
     return sorted(out, key=lambda e: -e.saved)
 
 
@@ -896,7 +934,8 @@ def _cache_page(win, entries: list[CacheEntry], c: dict[str, int], meta: dict[st
                f"{time.strftime('%H:%M', time.localtime(e.last_used))} on {day(e.last_used)}"
                if e.last_used else "not replayed yet")
     lines: list[tuple[str, int]] = [
-        (f"{_model(e.model)} in {e.project}, saved {day(e.saved)}, {replays}.", c["muted"]), ("", 0),
+        (f"{_model(e.model)} in {e.project}, {'from the real API' if e.via else 'from the stand-in model'}, "
+         f"saved {day(e.saved)}, {replays}.", c["muted"]), ("", 0),
         ("Asked", c["accent"] | curses.A_BOLD)]
     lines += [(w, c["text"]) for w in textwrap.wrap(" ".join(e.asked.split()), box_w - 6) or ["—"]]
     lines += [("", 0), ("Answered", c["accent"] | curses.A_BOLD)]

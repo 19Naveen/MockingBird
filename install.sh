@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Install mockingbird.
-#   curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.12.1/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.13.0/install.sh | bash
 # Env: MOCKINGBIRD_BASE    (raw URL to download from; defaults to this release's tag)
 #      MOCKINGBIRD_SRC     (local folder to copy from instead of downloading)
 #      MOCKINGBIRD_NO_HOOK (set to 1 to skip the hook, e.g. on any machine that runs production code)
 set -euo pipefail
 
 NAME=mockingbird
-VERSION=1.12.1
+VERSION=1.13.0
 REPO_URL=https://github.com/19Naveen/MockingBird
 BASE="${MOCKINGBIRD_BASE:-https://raw.githubusercontent.com/19Naveen/MockingBird/v$VERSION}"
 # The skill lives only in the shared skills folder; nothing goes into agent-specific folders.

@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="v1.12.1" src="https://img.shields.io/badge/version-1.12.1-black">
+  <img alt="v1.13.0" src="https://img.shields.io/badge/version-1.13.0-black">
   <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-black">
   <img alt="zero dependencies" src="https://img.shields.io/badge/dependencies-0-black">
   <img alt="Claude Code, Codex, opencode" src="https://img.shields.io/badge/works%20with-Claude%20Code%20%7C%20Codex%20%7C%20opencode-black">
@@ -27,7 +27,7 @@ Your code doesn't change. Stop the server and everything goes back to the real A
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.12.1/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.13.0/install.sh | bash
 ```
 
 Then open a new terminal. The installer:
@@ -39,7 +39,7 @@ Then open a new terminal. The installer:
 
 On a machine that runs production code, skip the hook: `curl -fsSL … | MOCKINGBIRD_NO_HOOK=1 bash`.
 
-The URL is pinned to the `v1.12.1` tag, so a later push to `main` can't change what it installs. Read `install.sh` before you pipe it to bash.
+The URL is pinned to the `v1.13.0` tag, so a later push to `main` can't change what it installs. Read `install.sh` before you pipe it to bash.
 
 ## Use
 
@@ -52,6 +52,7 @@ pytest                # in another terminal, run your app or tests as usual
 | Command | What it does |
 |---|---|
 | `serve` | Starts the server and the dashboard. Sonnet answers, at medium effort |
+| `serve --real` | Uses the real API with your own keys, and replays any call it has seen before ([below](#real-api-with-repeats-replayed)) |
 | `serve --model opus[max]` | Picks the model and effort, such as `sonnet[high]` or `haiku` |
 | `serve --plain` | Logs plain lines instead of drawing the dashboard (automatic with no terminal) |
 | `serve --agent` | Lets a coding agent's subagents answer instead (see [SKILL.md](SKILL.md)) |
@@ -80,6 +81,30 @@ To choose, pass `--model`: `sonnet[high]`, `opus[max]`, `haiku`, `codex`, `gpt-5
 **Why Sonnet by default:** mockingbird has to imitate an API exactly. It must call the right tools with valid arguments, return valid JSON when asked, and do it fast enough that a test suite doesn't drag. Sonnet does that reliably in about 6 to 8 seconds per fresh answer. Opus is slower and costs more of your plan's usage for little gain here. Haiku is faster, but more likely to get a tool call or JSON shape wrong. Replayed answers take no time whichever model wrote them.
 
 The Codex and opencode paths are covered by the self-check, but haven't yet been tried against a real Codex or opencode account. If one misbehaves, the dashboard shows the error.
+
+## Real API, with repeats replayed
+
+Working on one stage of a pipeline that calls a real model? Run:
+
+```bash
+mockingbird serve --real
+```
+
+Your app keeps its own API keys and talks to the real Anthropic, OpenAI or Azure OpenAI API. mockingbird sits in front of it:
+
+- A call that's identical to an earlier one is **replayed** from the cache: instant, and no API cost.
+- A call that's new or changed goes to the **real API** with your key, and the answer is saved for next time.
+- Errors (401, 429, 500…) go straight back to your app and are never saved, so its own retries work as usual.
+
+For example, say a pipeline makes 10 calls and you're editing the prompt in call 5. On the next run, calls 1 to 4 are replayed and call 5 goes to the real API. Calls 6 to 10 usually go too, because their input includes call 5's new answer. Replaying them would feed old answers downstream.
+
+To get a fresh answer for one call, select it on the Cache tab and press `x` twice. `mockingbird cache --purge` clears them all.
+
+**Keys and data:**
+- Your key and other headers are forwarded only to `api.anthropic.com`, `api.openai.com` or `*.openai.azure.com` (or to `BRIDGE_UPSTREAM_ANTHROPIC` / `BRIDGE_UPSTREAM_OPENAI` if you set them).
+- Keys are never written to disk or logs, and key fragments that providers echo in error messages are scrubbed.
+- Real answers are kept apart from stand-in answers, so neither is ever replayed in place of the other.
+- The cache holds real output from your pipeline. Treat `~/.local/state/mockingbird/cache` like the data the pipeline handles, and clear it when you're done.
 
 ## The dashboard
 

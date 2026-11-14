@@ -4,6 +4,8 @@
   serve [--model M[E]]  HTTP shim on 127.0.0.1 (Anthropic /v1/messages, OpenAI + Azure /chat/completions).
         [--auto CMD]    Shows a live dashboard in a terminal; --plain (or no terminal) logs lines to stderr instead.
         [--plain]       --model sonnet[high] answers each request with a lean `claude -p` call (gpt*/o*: `codex exec`).
+        [--real]        --real: no stand-in model. A call seen before is replayed; anything new goes to the real
+                        API with the app's own key (Anthropic, OpenAI, Azure) and its answer is saved.
         [--agent]       Default: sonnet[medium] when the claude CLI exists. --auto CMD runs any command instead
                         (prompt on stdin, JSON on stdout). --agent: a coding agent serves requests via next/answer.
                         Every call is logged (metadata only) to ~/.local/state/mockingbird/calls.db.
@@ -38,7 +40,7 @@ JOURNAL = None  # dashboard.Journal while `serve` runs: every call, on disk, for
 PROJECT = Path.cwd().name  # the folder the server runs in, shown per call
 QUIET = False  # True while the dashboard owns the terminal
 
-VERSION = "1.12.1"
+VERSION = "1.13.0"
 STATE = Path.home() / ".mockingbird" / "active.json"  # exists only while `serve` runs; the hook reads it
 CLAUDE_CMD = ('claude -p --model {m} --effort {e} --tools "" --system-prompt "You stand in for an LLM API. '
               'Follow the instructions in the user message exactly." --strict-mcp-config --disable-slash-commands '
@@ -54,6 +56,7 @@ DIR = Path(os.environ.get("BRIDGE_DIR", ".llm-bridge")).resolve()
 PORT = int(os.environ.get("BRIDGE_PORT", "8787"))
 TIMEOUT = float(os.environ.get("BRIDGE_TIMEOUT", "900"))
 AUTO = os.environ.get("BRIDGE_AUTO", "")
+REAL = os.environ.get("BRIDGE_REAL") == "1"  # serve --real: misses go to the real API with the app's own keys
 SLOTS = threading.BoundedSemaphore(int(os.environ.get("BRIDGE_PARALLEL", "4")))
 _cache = os.environ.get("BRIDGE_CACHE", str(dashboard.CACHE_DIR))  # one cache for every project; "off" disables
 CACHE = None if _cache.lower() == "off" else Path(_cache).resolve()
@@ -149,7 +152,8 @@ def openai_sse(body):
 
 class Shim(BaseHTTPRequestHandler):
     def _send(self, status, payload, ctype="application/json"):
-        data = payload.encode() if isinstance(payload, str) else json.dumps(payload).encode()
+        data = (payload if isinstance(payload, bytes) else payload.encode() if isinstance(payload, str)
+                else json.dumps(payload).encode())
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -169,6 +173,42 @@ class Shim(BaseHTTPRequestHandler):
             JOURNAL.record(rid, dashboard.Call(time.time(), model, api, source, time.time() - t0, status, label,
                                                PROJECT, self.key))
 
+    def _real(self, api, raw, req, rid, model, t0):
+        """--real: replay an identical earlier call, otherwise forward it to the real API with the app's own
+        headers (its API key) and save a successful answer. Headers are never stored or logged."""
+        base = upstream_for(api, self.headers)
+        if not base:
+            self._error(api, 400, "bridge: --real only forwards to api.anthropic.com, api.openai.com or "
+                                  "*.openai.azure.com, or to BRIDGE_UPSTREAM_ANTHROPIC / BRIDGE_UPSTREAM_OPENAI")
+            return self._record(rid, model, api, "ERROR", t0, "upstream not allowed", 400)
+        self.key = live_key(req, base)
+        cf = CACHE / f"{self.key}.json" if CACHE else None
+        if cf and cf.exists():
+            http = json.loads(cf.read_text())["http"]
+            self._send(http["status"], http["body"].encode(), http["content_type"])
+            log(f"{rid} replayed from cache (real API answer)")
+            return self._record(rid, model, api, "CACHE", t0, http_label(http["content_type"], http["body"]))
+        status, ctype, body = forward(base, self.path, raw, self.headers)
+        self._send(status, body, ctype)
+        text = body.decode("utf-8", "replace")
+        if status != 200:  # passed through as is, never cached: the app's own retry and error handling run
+            log(f"{rid} real API answered {status}")
+            message = text
+            try:
+                err = json.loads(text).get("error")
+                message = err.get("message", text) if isinstance(err, dict) else str(err or text)
+            except (ValueError, AttributeError):
+                pass
+            return self._record(rid, model, api, "ERROR", t0, scrub(" ".join(message.split()))[:80], status)
+        if cf:
+            cf.parent.mkdir(parents=True, exist_ok=True)
+            (cf.parent / ".gitignore").write_text("*\n")
+            _write(cf, {"meta": {"saved": time.time(), "model": model, "api": api, "project": PROJECT,
+                                 "asked": asked_text(req), "label": http_label(ctype, text), "via": base},
+                        "http": {"status": status, "content_type": ctype, "body": text}})
+        log(f"{rid} answered by the real API ({time.time() - t0:.1f}s)")
+        self._record(rid, model, api, "LIVE", t0, http_label(ctype, text))
+
     def do_POST(self):
         t0 = time.time()
         self.key = ""  # the request's cache key, so the Cache tab can count replays per answer
@@ -177,8 +217,9 @@ class Shim(BaseHTTPRequestHandler):
         if not api:  # count_tokens, /responses, embeddings, other vendors
             self._error("openai", 501, f"bridge: {path} not supported; only /v1/messages and /chat/completions")
             return self._record(None, "(no model)", "unknown", "ERROR", t0, f"unsupported {path}", 501)
+        raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         try:
-            req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            req = json.loads(raw or b"{}")
         except ValueError:
             self._error(api, 400, "bridge: request body is not JSON")
             return self._record(None, "(no model)", api, "ERROR", t0, "request body is not JSON", 400)
@@ -188,6 +229,8 @@ class Shim(BaseHTTPRequestHandler):
         if JOURNAL:
             JOURNAL.start(rid, model, api)
         log(f"{rid} received ({api}, model={model}, stream={bool(req.get('stream'))})")
+        if REAL:
+            return self._real(api, raw, req, rid, model, t0)
         ans, source = get_answer(api, path, req, rid)
         if ans is None:
             status, msg = 504, f"bridge: no subagent answer within {TIMEOUT:.0f}s"
@@ -214,6 +257,64 @@ class Shim(BaseHTTPRequestHandler):
 
 def request_key(req):
     return hashlib.sha256(_req_key(req).encode()).hexdigest()
+
+
+# ---------- --real: the real API behind the cache ----------
+
+UPSTREAM_DEFAULT = {"anthropic": "https://api.anthropic.com", "openai": "https://api.openai.com"}
+# Keys are forwarded only to the providers themselves (or to an upstream you name explicitly).
+ALLOWED_UPSTREAM = re.compile(r"https://(api\.anthropic\.com|api\.openai\.com|[A-Za-z0-9-]+\.openai\.azure\.com)"
+                              r"(:\d+)?")
+# Hop-by-hop and local-only headers; everything else (x-api-key, authorization, anthropic-version...) is forwarded.
+DROP_HEADERS = {"host", "content-length", "connection", "keep-alive", "transfer-encoding", "te", "upgrade",
+                "proxy-connection", "accept-encoding", "x-mockingbird-upstream"}
+
+
+def upstream_for(api, headers):
+    """Where to forward: the env override, else the host the hook says the app was calling, else the provider."""
+    override = os.environ.get(f"BRIDGE_UPSTREAM_{api.upper()}")
+    if override:
+        return override.rstrip("/")
+    hinted = (headers.get("x-mockingbird-upstream") or "").rstrip("/")
+    if hinted:
+        return hinted if ALLOWED_UPSTREAM.fullmatch(hinted) else None
+    return UPSTREAM_DEFAULT[api]
+
+
+def live_key(req, base):
+    # Real answers never share keys with stand-in answers, and streamed and plain replies are stored apart.
+    salt = f"|live|{base}|stream={bool(req.get('stream'))}"
+    return hashlib.sha256((_req_key(req) + salt).encode()).hexdigest()
+
+
+def forward(base, path, raw, headers):
+    """POST to the real API with the app's headers. Returns (status, content type, body bytes)."""
+    import urllib.request, urllib.error
+    sent = {k: v for k, v in headers.items() if k.lower() not in DROP_HEADERS}
+    request = urllib.request.Request(base + path, data=raw, headers=sent, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as r:
+            return r.status, r.headers.get("Content-Type", "application/json"), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers.get("Content-Type", "application/json"), e.read()
+    except OSError as e:
+        msg = f"mockingbird could not reach {base}: {e}"
+        return 502, "application/json", json.dumps({"error": {"type": "api_error", "message": msg}}).encode()
+
+
+KEYLIKE = re.compile(r"\b(sk|rk|pk|key|api[-_]?key)[-_][A-Za-z0-9*_-]{4,}", re.I)
+
+
+def scrub(text):
+    """Providers echo part of a bad key in their errors ("sk-proj-ab*****xyz"): never let that reach the journal."""
+    return KEYLIKE.sub("[key]", text)
+
+
+def http_label(ctype, body):
+    """Journal label for a real answer: tool names or text length, never the text itself."""
+    text = dashboard.http_answer_text(ctype, body)
+    calls = re.findall(r"→ calls ([\w.-]+)\(", text)
+    return "tool_use " + ", ".join(calls) if calls else f"text · {len(text):,} chars"
 
 
 def cache_file(req):
@@ -330,7 +431,7 @@ def run_auto(api, req, rid):
 def serve(port=PORT):
     _dirs()
     srv = ThreadingHTTPServer(("127.0.0.1", port), Shim)  # loopback only
-    mode = f"auto: {AUTO}" if AUTO else "agent serves via next/answer"
+    mode = "real API (repeats replayed)" if REAL else f"auto: {AUTO}" if AUTO else "agent serves via next/answer"
     log(f"v{VERSION} listening on http://127.0.0.1:{srv.server_port}  mode={mode}  cache={CACHE or 'off'}")
     return srv
 
@@ -579,7 +680,7 @@ def hook(action, python=None):
 # ---------- self-check ----------
 
 def selftest():
-    global DIR, AUTO, CACHE, JOURNAL, QUIET
+    global DIR, AUTO, CACHE, JOURNAL, QUIET, REAL
     import tempfile, urllib.request, urllib.error
     DIR, AUTO, CACHE, QUIET = Path(tempfile.mkdtemp()), "", None, True
     JOURNAL = dashboard.Journal(DIR / "calls.db")  # never the real journal
@@ -722,6 +823,99 @@ def selftest():
     assert dashboard.bar(0.84, 18) == "███████████████▏░░"  # 15.12 cells: a left-eighth, never a "▁"
     chart = dashboard.area([0, 2, 4, 1], 4, 2)
     assert len(chart) == 2 and all(len(line) == 4 for line in chart) and chart[0] != chart[1]
+
+    # --real, against a fake upstream: forward misses with the app's headers, save and replay successes,
+    # keep streamed replies apart, pass errors through uncached, and never write a key to disk.
+    seen = []
+
+    class Upstream(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            seen.append((self.path, {k.lower(): v for k, v in self.headers.items()}, body))
+            if self.headers.get("x-api-key") == "bad":
+                status, ctype = 401, "application/json"
+                out = b'{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}'
+            elif body.get("stream"):
+                status, ctype = 200, "text/event-stream"
+                out = (b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,'
+                       b'"delta":{"type":"text_delta","text":"streamed real"}}\n\n')
+            else:
+                status, ctype = 200, "application/json"
+                out = json.dumps({"type": "message", "role": "assistant", "stop_reason": "end_turn",
+                                  "content": [{"type": "text", "text": "real answer"}]}).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, format, *args):
+            pass
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    os.environ["BRIDGE_UPSTREAM_ANTHROPIC"] = f"http://127.0.0.1:{upstream.server_port}"
+    REAL, CACHE = True, DIR / "real-cache"
+    srv = serve(0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    def call(body, headers):
+        rq = urllib.request.Request(f"http://127.0.0.1:{srv.server_port}/v1/messages", json.dumps(body).encode(),
+                                    {"Content-Type": "application/json", **headers})
+        try:
+            with urllib.request.urlopen(rq, timeout=20) as resp:
+                return resp.status, resp.read().decode(), resp.headers.get("Content-Type")
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode(), e.headers.get("Content-Type")
+
+    key = {"x-api-key": "sk-test-not-real", "anthropic-version": "2023-06-01"}
+    q = {"model": "claude-x", "max_tokens": 9, "messages": [{"role": "user", "content": "stage 3"}]}
+    s, body, _ = call(q, key)
+    assert s == 200 and "real answer" in body and len(seen) == 1, (s, body)
+    path, headers, sent = seen[0]
+    assert path == "/v1/messages" and sent == q and headers["x-api-key"] == "sk-test-not-real"
+    assert headers["anthropic-version"] == "2023-06-01" and "x-mockingbird-upstream" not in headers
+    s, body, _ = call(q, key)
+    assert s == 200 and "real answer" in body and len(seen) == 1  # replayed: the real API was not called again
+    s, body, ctype = call({**q, "stream": True}, key)
+    assert "text/event-stream" in ctype and "streamed real" in body and len(seen) == 2  # stored apart from plain
+    s, body, ctype = call({**q, "stream": True}, key)
+    assert "streamed real" in body and len(seen) == 2
+    bad = {**q, "messages": [{"role": "user", "content": "stage 4"}]}
+    assert call(bad, {"x-api-key": "bad"})[0] == 401 and call(bad, {"x-api-key": "bad"})[0] == 401
+    assert len(seen) == 4  # errors are never cached, so both reached the real API
+    assert scrub("Incorrect API key provided: sk-proj-ab*****xyz.") == "Incorrect API key provided: [key]."
+    assert scrub("invalid x-api-key") == "invalid x-api-key"  # header names are not keys
+    assert not any("sk-test" in f.read_text() for f in CACHE.glob("*.json")), "an API key reached the cache"
+    entries = dashboard.cache_entries(CACHE, JOURNAL.calls())
+    assert len(entries) == 2 and all(e.via for e in entries), entries
+    assert {e.answer for e in entries} == {"real answer", "streamed real"} and entries[0].asked == "stage 3"
+    sources = [c.source for c in JOURNAL.calls()[-6:]]
+    assert sources == ["LIVE", "CACHE", "LIVE", "CACHE", "ERROR", "ERROR"], sources
+    assert request_key(q) != live_key(q, "https://api.anthropic.com")  # real answers never replay stand-in ones
+    srv.shutdown()
+    upstream.shutdown()
+    del os.environ["BRIDGE_UPSTREAM_ANTHROPIC"]
+    REAL = False
+
+    # only the providers may receive a key; Azure's per-customer hosts come from the hook
+    assert upstream_for("anthropic", {}) == "https://api.anthropic.com"
+    assert upstream_for("openai", {"x-mockingbird-upstream": "https://myco.openai.azure.com"}) == \
+        "https://myco.openai.azure.com"
+    assert upstream_for("anthropic", {"x-mockingbird-upstream": "https://evil.example"}) is None
+
+    class FakeURL:  # the slice of httpx.URL the hook touches
+        def __init__(self, scheme, host, port):
+            self.scheme, self.host, self.port = scheme, host, port
+
+        def copy_with(self, scheme, host, port):
+            return FakeURL(scheme, host, port)
+
+    _write(Path(hk.STATE), {"port": 8787, "pid": os.getpid()})
+    sent = type("Req", (), {})()
+    sent.url, sent.headers = FakeURL("https", "myco.openai.azure.com", None), {}
+    hk._redirect(sent)
+    assert sent.headers["x-mockingbird-upstream"] == "https://myco.openai.azure.com" and sent.url.port == 8787
     print("selftest ok")
 
 
@@ -733,8 +927,11 @@ if __name__ == "__main__":
     if cmd == "serve":
         if "--auto" in args:
             AUTO = args[args.index("--auto") + 1]
+        REAL = REAL or "--real" in args
         spec = args[args.index("--model") + 1] if "--model" in args else None
-        if not spec and not AUTO and "--agent" not in args:
+        if REAL:
+            spec, AUTO = None, ""  # no stand-in model: misses go to the real API
+        elif not spec and not AUTO and "--agent" not in args:
             spec = default_spec()
             if not spec:
                 log("no claude, codex or opencode CLI found: agent mode (an agent answers via next/answer)")
@@ -753,7 +950,7 @@ if __name__ == "__main__":
                 threading.Thread(target=srv.serve_forever, daemon=True).start()
                 hooked = str(HOOK_DIR) in os.environ.get("PYTHONPATH", "").split(os.pathsep)
                 dashboard.run(JOURNAL, cache_dir=CACHE, meta={
-                    "mode": (f"{spec_label(spec)} answers" if spec
+                    "mode": ("real API, repeats replayed" if REAL else f"{spec_label(spec)} answers" if spec
                              else "custom auto command" if AUTO else "agent mode (subagents answer)"),
                     "address": f"http://127.0.0.1:{srv.server_port}",
                     "cache": str(CACHE) if CACHE else "",
