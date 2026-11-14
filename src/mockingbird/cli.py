@@ -335,6 +335,13 @@ def selftest():
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     state.DIR, state.AUTO, state.CACHE, state.QUIET = Path(tempfile.mkdtemp()), "", None, True
     state.JOURNAL = dashboard.Journal(state.DIR / "calls.db")  # never the real journal
+
+    def wait_for_calls(count, timeout=5):
+        # Journal records are written after the response is sent, so a client can return first.
+        deadline = time.time() + timeout
+        while len(state.JOURNAL.calls()) < count and time.time() < deadline:
+            time.sleep(0.01)
+
     srv = server.serve(0)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{srv.server_port}"
@@ -426,6 +433,7 @@ def selftest():
     assert hk.bridge_port() is None
 
     # dashboard: every call above was recorded with the right source, and the screen data builds from it
+    wait_for_calls(7)
     calls, inflight = state.JOURNAL.calls(), state.JOURNAL.inflight()
     sources = [c.source for c in calls]
     assert sources.count("AGENT") == 2 and sources.count("FRESH") == 1 and sources.count("CACHE") == 1, sources
@@ -508,6 +516,7 @@ def selftest():
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
     threading.Thread(target=upstream.serve_forever, daemon=True).start()
     os.environ["BRIDGE_UPSTREAM_ANTHROPIC"] = f"http://127.0.0.1:{upstream.server_port}"
+    journal_before = len(state.JOURNAL.calls())
     state.REAL, state.CACHE = True, state.DIR / "real-cache"
     srv = server.serve(0)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -540,10 +549,11 @@ def selftest():
     assert server.scrub("Incorrect API key provided: sk-proj-ab*****xyz.") == "Incorrect API key provided: [key]."
     assert server.scrub("invalid x-api-key") == "invalid x-api-key"  # header names are not keys
     assert not any("sk-test" in f.read_text() for f in state.CACHE.glob("*.json")), "an API key reached the cache"
+    wait_for_calls(journal_before + 6)
     entries = dashboard.cache_entries(state.CACHE, state.JOURNAL.calls())
     assert len(entries) == 2 and all(e.via for e in entries), entries
     assert {e.answer for e in entries} == {"real answer", "streamed real"} and entries[0].asked == "stage 3"
-    sources = [c.source for c in state.JOURNAL.calls()[-6:]]
+    sources = [c.source for c in state.JOURNAL.calls()[journal_before:]]
     assert sources == ["LIVE", "CACHE", "LIVE", "CACHE", "ERROR", "ERROR"], sources
     assert store.request_key(q) != store.live_key(q, "https://api.anthropic.com")  # real answers never replay stand-in ones
     srv.shutdown()
