@@ -1,65 +1,99 @@
 #!/usr/bin/env bash
-# Install the mockingbird skill for Claude Code, Codex and opencode.
-#   curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.10.1/install.sh | bash
+# Install mockingbird.
+#   curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.11.0/install.sh | bash
 # Env: MOCKINGBIRD_BASE    (raw URL to download from; defaults to this release's tag)
 #      MOCKINGBIRD_SRC     (local folder to copy from instead of downloading)
-#      MOCKINGBIRD_NO_HOOK (set to 1 to skip the global hook, e.g. on any machine that runs production code)
+#      MOCKINGBIRD_NO_HOOK (set to 1 to skip the hook, e.g. on any machine that runs production code)
 set -euo pipefail
 
 NAME=mockingbird
-VERSION=1.10.1
+VERSION=1.11.0
+REPO_URL=https://github.com/19Naveen/MockingBird
 BASE="${MOCKINGBIRD_BASE:-https://raw.githubusercontent.com/19Naveen/MockingBird/v$VERSION}"
+# One real copy in the shared skills folder (Codex and opencode read it); Claude Code gets a single link.
 DEST="$HOME/.agents/skills/$NAME"
 
-command -v python3 >/dev/null || { echo "$NAME needs python3 (3.9+)" >&2; exit 1; }
-mkdir -p "$DEST"
+if [ -t 1 ]; then
+  B=$'\e[1m'; D=$'\e[2m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; C=$'\e[36m'; X=$'\e[0m'
+else
+  B=; D=; G=; Y=; R=; C=; X=
+fi
+doing() { [ -t 1 ] && printf '  %s…%s %s' "$D" "$X" "$1"; return 0; }
+done_() { [ -t 1 ] && printf '\r\e[2K'; printf '  %s✓%s %s\n' "$G" "$X" "$1"; }
+note()  { printf '  %s!%s %s\n' "$Y" "$X" "$1"; }
+fail()  { [ -t 1 ] && printf '\r\e[2K'; printf '  %s✗%s %s\n' "$R" "$X" "$1" >&2; exit 1; }
 
-echo "Installing $NAME v$VERSION"
-echo "  downloading files"
+command -v python3 >/dev/null || fail "mockingbird needs python3 (3.9 or newer). Install it, then run this again."
+
+cat <<EOF
+${C}                         __   _             __    _          __
+   ____ ___  ____  _____/ /__(_)___  ____ _/ /_  (_)________/ /
+  / __ \`__ \\/ __ \\/ ___/ //_/ / __ \\/ __ \`/ __ \\/ / ___/ __  /
+ / / / / / / /_/ / /__/ ,< / / / / / /_/ / /_/ / / /  / /_/ /
+/_/ /_/ /_/\\____/\\___/_/|_/_/_/ /_/\\__, /_.___/_/_/   \\__,_/
+                                  /____/${X}
+
+  ${B}Installing mockingbird ${VERSION}${X}
+
+EOF
+
+mkdir -p "$DEST"
+doing "Downloading"
 for f in SKILL.md bridge.py dashboard.py mockingbird_hook.py uninstall.sh; do
-  if [ -n "${MOCKINGBIRD_SRC:-}" ]; then cp "$MOCKINGBIRD_SRC/$f" "$DEST/$f.tmp"
+  if [ -n "${MOCKINGBIRD_SRC:-}" ]; then
+    cp "$MOCKINGBIRD_SRC/$f" "$DEST/$f.tmp"
   elif ! curl -fsSL --connect-timeout 15 --max-time 120 --retry 2 "$BASE/$f" -o "$DEST/$f.tmp"; then
     rm -f "$DEST/$f.tmp"
-    echo "Could not download $f from $BASE. Check your connection to GitHub and run the installer again." >&2
-    exit 1
+    fail "Couldn't download $f from GitHub. Check your connection, then run this again."
   fi
   mv "$DEST/$f.tmp" "$DEST/$f"   # never leave a half-downloaded file in place
 done
 chmod +x "$DEST/bridge.py" "$DEST/uninstall.sh"
+done_ "Downloaded"
 
-# No stdin for child steps: under `curl | bash` stdin is the rest of this script, and nothing may wait on a key.
-echo "  running the self-check"
+# Child steps get no stdin: under `curl | bash` stdin is the rest of this script, and nothing may wait on a key.
+doing "Running the self-check"
 limit=""
 command -v timeout >/dev/null && limit="timeout 180"
 $limit python3 "$DEST/bridge.py" selftest </dev/null >/dev/null 2>&1 \
-  || { echo "$NAME: the self-check failed. See why with: python3 $DEST/bridge.py selftest" >&2; exit 1; }
+  || fail "The self-check failed. See why with: python3 $DEST/bridge.py selftest"
+done_ "Self-check passed"
 
-# Global hook: every Python started from your shell routes LLM calls to mockingbird while its server runs.
 if [ -z "${MOCKINGBIRD_NO_HOOK:-}" ]; then
-  echo "  installing the hook"
-  python3 "$DEST/bridge.py" hook install </dev/null
+  python3 "$DEST/bridge.py" hook install </dev/null >/dev/null
+  shells=""
+  for rc in .bashrc .zshrc; do
+    grep -q '# >>> mockingbird >>>' "$HOME/$rc" 2>/dev/null && shells="$shells${shells:+ and }~/$rc"
+  done
+  done_ "Hook added to ${shells:-your shell}"
 else
-  echo "skipped global hook (MOCKINGBIRD_NO_HOOK set)"
+  note "Hook skipped (MOCKINGBIRD_NO_HOOK is set)"
 fi
 
-# `mockingbird` command, so the tool works without any agent.
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$DEST/bridge.py" "$HOME/.local/bin/$NAME"
-case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "add ~/.local/bin to PATH to use the '$NAME' command" >&2 ;; esac
+done_ "Command ${B}mockingbird${X} added to ~/.local/bin"
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) note "Add ~/.local/bin to your PATH to use it" ;; esac
 
-# Link into every agent that is installed on this machine.
-for d in "$HOME/.claude" "$HOME/.codex" "$HOME/.config/opencode"; do
-  [ -d "$d" ] || continue
-  link="$d/skills/$NAME"
-  mkdir -p "$d/skills"
-  if [ -e "$link" ] && [ ! -L "$link" ]; then echo "skip $link: a real folder is there, remove it to link" >&2; continue; fi
-  ln -sfn "$DEST" "$link"
-  echo "linked $link"
+# Earlier versions linked the skill into each agent's own folder. The shared folder covers Codex and opencode now.
+for old in "$HOME/.codex/skills/$NAME" "$HOME/.config/opencode/skills/$NAME"; do
+  if [ -L "$old" ]; then rm "$old"; fi
 done
-
-# opencode: slash command wrapper so /mockingbird works there too.
+agents=""
+if [ -d "$HOME/.claude" ]; then
+  link="$HOME/.claude/skills/$NAME"
+  mkdir -p "$HOME/.claude/skills"
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    note "Claude Code: ~/.claude/skills/$NAME is a real folder, so it was left alone. Remove it and run this again."
+  else
+    ln -sfn "$DEST" "$link"
+    agents="Claude Code"
+  fi
+fi
+[ -d "$HOME/.codex" ] && agents="$agents${agents:+, }Codex"
 if [ -d "$HOME/.config/opencode" ]; then
-  mkdir -p "$HOME/.config/opencode/commands"
+  agents="$agents${agents:+, }opencode"
+  mkdir -p "$HOME/.config/opencode/commands"   # so /mockingbird works in opencode too
   cat > "$HOME/.config/opencode/commands/$NAME.md" <<'EOF'
 ---
 description: Run AI tests with LLM calls answered by a subagent. Args: model[effort] [test command]
@@ -67,15 +101,15 @@ description: Run AI tests with LLM calls answered by a subagent. Args: model[eff
 Load the `mockingbird` skill and follow it. Arguments: $ARGUMENTS
 EOF
 fi
+done_ "Skill in ~/.agents/skills${agents:+, available to $agents}"
 
-cat <<'EOF'
-                         __   _             __    _          __
-   ____ ___  ____  _____/ /__(_)___  ____ _/ /_  (_)________/ /
-  / __ `__ \/ __ \/ ___/ //_/ / __ \/ __ `/ __ \/ / ___/ __  /
- / / / / / / /_/ / /__/ ,< / / / / / /_/ / /_/ / / /  / /_/ /
-/_/ /_/ /_/\____/\___/_/|_/_/_/ /_/\__, /_.___/_/_/   \__,_/
-                                  /____/
+cat <<EOF
+
+  ${B}Next${X}
+    1. Open a new terminal
+    2. Run ${B}mockingbird serve${X}
+    3. Run your app or its tests in another terminal
+
+  ${D}Docs  $REPO_URL${X}
+
 EOF
-echo "installed $NAME v$(python3 "$DEST/bridge.py" version) to $DEST"
-echo "open a new terminal, then:  $NAME serve --model sonnet[high]   (Ctrl+C = back to the real API)"
-echo "or in an agent:  /$NAME sonnet[high] <test command>   (Codex: \$$NAME ...)"
