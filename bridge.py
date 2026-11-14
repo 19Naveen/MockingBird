@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Fake LLM endpoint for tests: parks each API call on disk until a coding-agent subagent answers it.
 
-  serve [--model M[E]]  HTTP shim on 127.0.0.1 (Anthropic /v1/messages, OpenAI + Azure /chat/completions).
-        [--auto CMD]    Shows a live dashboard in a terminal; --plain (or no terminal) logs lines to stderr instead.
-        [--plain]       --model sonnet[high] answers each request with a lean `claude -p` call (gpt*/o*: `codex exec`).
+  serve [--model M[E]]  HTTP shim on 127.0.0.1 (Anthropic Messages, OpenAI/Azure/Foundry Chat Completions,
+        [--auto CMD]    Bedrock Converse and Gemini generateContent). Shows a live dashboard in a terminal; --plain
+        [--plain]       (or no terminal) logs lines to stderr instead.
+                        --model sonnet[high] answers each request with a lean `claude -p` call (gpt*/o*: `codex exec`).
         [--redact]      Disable disk caching and hide model, project and error details in history and logs.
         [--replay]      Offline: replay saved answers, return 409 on a cache miss, never call a model or upstream.
         [--faults FILE] Apply a JSON list of errors, raw bodies and delays, one step per incoming API request.
         [--real]        --real: no stand-in model. A call seen before is replayed; anything new goes to the real
-                        API with the app's own key (Anthropic, OpenAI, Azure) and its answer is saved.
+                        API with the app's own key (Anthropic, OpenAI, Azure/Foundry) and its answer is saved.
         [--agent]       Default: sonnet[medium] when the claude CLI exists. --auto CMD runs any command instead
                         (prompt on stdin, JSON on stdout). --agent: a coding agent serves requests via next/answer.
                         Every call is logged (metadata only) to ~/.local/state/mockingbird/calls.db.
@@ -40,7 +41,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # dashboard.py sits beside us, even via the ~/.local/bin link
-import dashboard, attachments  # noqa: E402
+import dashboard, attachments, providers_bedrock, providers_google  # noqa: E402
+
+PROVIDERS = {"bedrock": providers_bedrock, "google": providers_google}
 
 JOURNAL = None  # dashboard.Journal while `serve` runs: every call, on disk, for the dashboard and `stats`
 PROJECT = Path.cwd().name  # the folder the server runs in, shown per call
@@ -74,6 +77,9 @@ FAULT_LOCK = threading.Lock()
 # shortcut: fixed lock stripes may serialize unrelated keys; use per-key locks if throughput needs it.
 CACHE_LOCKS = [threading.Lock() for _ in range(64)]
 REDIRECT_VARS = ("ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "AZURE_OPENAI_ENDPOINT",
+                 "ANTHROPIC_FOUNDRY_BASE_URL", "ANTHROPIC_FOUNDRY_API_KEY", "AZURE_AI_ENDPOINT", "AZURE_INFERENCE_ENDPOINT",
+                 "GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL", "GOOGLE_API_KEY", "GEMINI_API_KEY",
+                 "AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
                  "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AZURE_OPENAI_API_KEY")
 STOP_TO_OPENAI = {"end_turn": "stop", "tool_use": "tool_calls", "max_tokens": "length", "stop_sequence": "stop"}
 
@@ -172,12 +178,14 @@ def openai_sse(body):
 # ---------- HTTP shim ----------
 
 class Shim(BaseHTTPRequestHandler):
-    def _send(self, status, payload, ctype="application/json"):
+    def _send(self, status, payload, ctype="application/json", headers=None):
         data = (payload if isinstance(payload, bytes) else payload.encode() if isinstance(payload, str)
                 else json.dumps(payload).encode())
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         try:
             self.wfile.write(data)
@@ -185,6 +193,10 @@ class Shim(BaseHTTPRequestHandler):
             pass  # a timeout test may deliberately abandon a delayed response
 
     def _error(self, api, status, msg):
+        if api in PROVIDERS:
+            body = PROVIDERS[api].error(status, msg)
+            headers = {"x-amzn-errortype": body["__type"]} if api == "bedrock" else None
+            return self._send(status, body, headers=headers)
         body = ({"type": "error", "error": {"type": "api_error", "message": msg}} if api == "anthropic"
                 else {"error": {"message": msg, "type": "api_error", "code": status}})
         self._send(status, body)
@@ -247,8 +259,9 @@ class Shim(BaseHTTPRequestHandler):
         self.key = ""  # the request's cache key, so the Cache tab can count replays per answer
         path = self.path.split("?")[0].rstrip("/")
         api = "anthropic" if path.endswith("/messages") else "openai" if path.endswith("/chat/completions") else None
+        api = api or next((name for name, adapter in PROVIDERS.items() if adapter.matches(path)), None)
         if not api:  # count_tokens, /responses, embeddings, other vendors
-            self._error("openai", 501, f"bridge: {path} not supported; only /v1/messages and /chat/completions")
+            self._error("openai", 501, f"bridge: {path} not supported; use Messages, Chat Completions, Bedrock Converse or Gemini generateContent")
             return self._record(None, "(no model)", "unknown", "ERROR", t0, f"unsupported {path}", 501)
         try:
             size = int(self.headers.get("Content-Length", 0))
@@ -266,6 +279,15 @@ class Shim(BaseHTTPRequestHandler):
         except ValueError:
             self._error(api, 400, "bridge: request body is not JSON")
             return self._record(None, "(no model)", api, "ERROR", t0, "request body is not JSON", 400)
+        if api in PROVIDERS:
+            if REAL:
+                return self._error(api, 501, f"bridge: --real forwarding is not supported for native {api}; use stand-in or offline replay mode")
+            try:
+                req = PROVIDERS[api].normalize(self.path, req)
+            except attachments.InputError as e:
+                return self._error(api, e.status, "bridge: " + str(e))
+            except (ValueError, TypeError, KeyError) as e:
+                return self._error(api, 400, f"bridge: invalid {api} request: {e}")
         rid = f"{time.time_ns()}-{uuid.uuid4().hex[:6]}"  # sortable, so `next` serves oldest first
         model = str(req.get("model", "(no model)"))
         self.key = request_key(req, api)
@@ -292,14 +314,16 @@ class Shim(BaseHTTPRequestHandler):
             status, msg = int(ans.get("status", 500)), "bridge: " + str(ans["error"])
         else:
             try:
-                body = (anthropic_body if api == "anthropic" else openai_body)(ans, req, rid)
+                adapter = PROVIDERS.get(api)
+                body = adapter.response(ans, req, rid) if adapter else (anthropic_body if api == "anthropic" else openai_body)(ans, req, rid)
                 if req.get("stream"):
-                    self._send(200, (anthropic_sse if api == "anthropic" else openai_sse)(body), "text/event-stream")
+                    stream = adapter.stream(body) if adapter else (anthropic_sse if api == "anthropic" else openai_sse)(body)
+                    self._send(200, stream, adapter.CONTENT_TYPE if adapter else "text/event-stream")
                 else:
                     self._send(200, body)
                 log(f"{rid} answered ({source}, {time.time() - t0:.1f}s)")
                 return self._record(rid, model, api, source, t0, describe(ans))
-            except (KeyError, TypeError, IndexError) as e:
+            except (KeyError, TypeError, IndexError, attachments.InputError) as e:
                 status, msg = 500, f"bridge: answer could not be shaped into a {api} response: {e!r}"
         self._error(api, status, msg)
         log(f"{rid} error {status}: {msg}")
@@ -318,7 +342,7 @@ def request_key(req, api=""):
 
 UPSTREAM_DEFAULT = {"anthropic": "https://api.anthropic.com", "openai": "https://api.openai.com"}
 # Keys are forwarded only to the providers themselves (or to an upstream you name explicitly).
-ALLOWED_UPSTREAM = re.compile(r"https://(api\.anthropic\.com|api\.openai\.com|[A-Za-z0-9-]+\.openai\.azure\.com)"
+ALLOWED_UPSTREAM = re.compile(r"https://(api\.anthropic\.com|api\.openai\.com|(?:[A-Za-z0-9-]+\.)+(?:openai|services\.ai|models\.ai|inference\.ai)\.azure\.com)"
                               r"(:\d+)?")
 # Hop-by-hop and local-only headers; everything else (x-api-key, authorization, anthropic-version...) is forwarded.
 DROP_HEADERS = {"host", "content-length", "connection", "keep-alive", "transfer-encoding", "te", "upgrade",
@@ -723,9 +747,16 @@ def run_command(args):
             env = {**os.environ, "MOCKINGBIRD_ENABLED": "1", "MOCKINGBIRD_STATE": str(state),
                    "PYTHONPATH": str(root) + os.pathsep + os.environ.get("PYTHONPATH", ""),
                    "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}",
-                   "OPENAI_BASE_URL": f"http://127.0.0.1:{port}/v1", "AZURE_OPENAI_ENDPOINT": f"http://127.0.0.1:{port}"}
+                   "OPENAI_BASE_URL": f"http://127.0.0.1:{port}/v1", "AZURE_OPENAI_ENDPOINT": f"http://127.0.0.1:{port}",
+                   "ANTHROPIC_FOUNDRY_BASE_URL": f"http://127.0.0.1:{port}/anthropic",
+                   "AZURE_AI_ENDPOINT": f"http://127.0.0.1:{port}/models", "AZURE_INFERENCE_ENDPOINT": f"http://127.0.0.1:{port}/models",
+                   "GOOGLE_GEMINI_BASE_URL": f"http://127.0.0.1:{port}", "GOOGLE_VERTEX_BASE_URL": f"http://127.0.0.1:{port}",
+                   "AWS_ENDPOINT_URL_BEDROCK_RUNTIME": f"http://127.0.0.1:{port}"}
             if not REAL:
-                env.update({key: "bridge-dummy" for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AZURE_OPENAI_API_KEY")})
+                env.update({key: "bridge-dummy" for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AZURE_OPENAI_API_KEY",
+                    "ANTHROPIC_FOUNDRY_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")})
+                env.setdefault("AWS_DEFAULT_REGION", env.get("AWS_REGION", "us-east-1"))
+                env["AWS_EC2_METADATA_DISABLED"] = "true"
             child = subprocess.Popen(command, env=env, start_new_session=True)
             processes.append(child)
             try:

@@ -1,4 +1,5 @@
 import concurrent.futures
+import importlib.util
 import io
 import json
 import os
@@ -14,7 +15,12 @@ import urllib.request, urllib.error
 import shlex
 
 import bridge
-import mockingbird_hook as hook
+
+# A user-level hook may already be installed and loaded by Python's .pth file. Test the checkout's copy, not that one.
+_spec = importlib.util.spec_from_file_location(
+    "mockingbird_hook_repo", Path(__file__).resolve().parents[1] / "mockingbird_hook.py")
+hook = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(hook)
 
 
 class BridgeTests(unittest.TestCase):

@@ -39,7 +39,7 @@ EOF
 
 mkdir -p "$DEST"
 doing "Downloading"
-for f in SKILL.md bridge.py dashboard.py attachments.py mockingbird_hook.py uninstall.sh LICENSE; do
+for f in SKILL.md bridge.py dashboard.py attachments.py providers_bedrock.py providers_google.py mockingbird_hook.py uninstall.sh LICENSE; do
   if [ -n "${MOCKINGBIRD_SRC:-}" ]; then
     cp "$MOCKINGBIRD_SRC/$f" "$DEST/$f.tmp"
   elif ! curl -fsSL --connect-timeout 15 --max-time 120 --retry 2 "$BASE/$f" -o "$DEST/$f.tmp"; then

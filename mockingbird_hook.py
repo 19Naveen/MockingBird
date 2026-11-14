@@ -7,11 +7,15 @@ Install or remove it with `bridge.py hook install|uninstall <python>`. Never ins
 """
 import json
 import os
+import re
 import sys
+from urllib.parse import urlsplit, urlunsplit
 
 STATE = os.environ.get("MOCKINGBIRD_STATE", os.path.join(os.path.expanduser("~"), ".mockingbird", "active.json"))
-HOSTS = ("api.anthropic.com", "api.openai.com")
-MODULES = ("httpx", "httpx2")  # older SDKs use httpx; anthropic>=2 and openai>=3 use httpx2 (same API)
+HOSTS = ("api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com", "aiplatform.googleapis.com")
+SUFFIXES = (".openai.azure.com", ".services.ai.azure.com", ".models.ai.azure.com", ".inference.ai.azure.com",
+            "-aiplatform.googleapis.com")
+MODULES = ("httpx", "httpx2", "requests.sessions", "aiohttp.client", "botocore.httpsession", "google.auth._default")
 _announced = False
 
 
@@ -26,29 +30,94 @@ def bridge_port():
         return None
 
 
-def _redirect(request):
+def _provider(host):
+    return (host in HOSTS or host.endswith(SUFFIXES) or
+            bool(re.fullmatch(r"bedrock-runtime(?:-fips)?\.[a-z0-9-]+\.amazonaws\.com(?:\.cn)?", host)))
+
+
+def _announce(port):
     global _announced
-    if os.environ.get("MOCKINGBIRD_ENABLED") != "1":
-        return
-    host = request.url.host
-    if host not in HOSTS and not host.endswith(".openai.azure.com"):
-        return
-    port = bridge_port()
-    if port is None:
-        return
-    # Where the call was really going (Azure hosts are per customer); `serve --real` forwards misses there.
-    original_port = request.url.port
-    request.headers["x-mockingbird-upstream"] = (f"{request.url.scheme}://{host}"
-                                                 + (f":{original_port}" if original_port else ""))
-    request.url = request.url.copy_with(scheme="http", host="127.0.0.1", port=port)
-    request.headers["host"] = f"127.0.0.1:{port}"
     if not _announced:
         _announced = True
         print(f"[mockingbird] LLM calls -> bridge on 127.0.0.1:{port} (stop the bridge to use the real API)",
               file=sys.stderr)
 
 
+def _redirect_url(url, headers):
+    if os.environ.get("MOCKINGBIRD_ENABLED") != "1":
+        return url
+    parsed = urlsplit(str(url))
+    if not parsed.hostname or not _provider(parsed.hostname):
+        return url
+    port = bridge_port()
+    if port is None:
+        return url
+    headers["x-mockingbird-upstream"] = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    headers["host"] = f"127.0.0.1:{port}"
+    _announce(port)
+    return urlunsplit(("http", f"127.0.0.1:{port}", parsed.path, parsed.query, parsed.fragment))
+
+
+def _redirect(request):
+    if isinstance(request.url, str):
+        request.url = _redirect_url(request.url, request.headers)
+        return
+    if os.environ.get("MOCKINGBIRD_ENABLED") != "1" or not _provider(request.url.host):
+        return
+    port = bridge_port()
+    if port is None:
+        return
+    host, original_port = request.url.host, request.url.port
+    request.headers["x-mockingbird-upstream"] = (f"{request.url.scheme}://{host}"
+                                                 + (f":{original_port}" if original_port else ""))
+    request.url = request.url.copy_with(scheme="http", host="127.0.0.1", port=port)
+    request.headers["host"] = f"127.0.0.1:{port}"
+    _announce(port)
+
+
 def _patch(httpx):
+    name = httpx.__name__
+    if name == "google.auth._default":
+        original = httpx.default
+        if getattr(original, "_mockingbird", False):
+            return
+        def default(*args, **kw):
+            if os.environ.get("MOCKINGBIRD_ENABLED") == "1" and bridge_port() is not None:
+                from google.auth.credentials import AnonymousCredentials
+                credentials = AnonymousCredentials()
+                credentials.token = "bridge-dummy"
+                return credentials, os.environ.get("GOOGLE_CLOUD_PROJECT", "bridge-test-project")
+            return original(*args, **kw)
+        default._mockingbird = True
+        httpx.default = default
+        parent = sys.modules.get("google.auth")
+        if parent and getattr(parent, "default", None) is original:
+            parent.default = default
+        return
+    if name in ("requests.sessions", "botocore.httpsession"):
+        cls = httpx.Session if name == "requests.sessions" else httpx.URLLib3Session
+        send = cls.send
+        if getattr(send, "_mockingbird", False):
+            return
+        def patched(self, request, *args, **kw):
+            _redirect(request)
+            return send(self, request, *args, **kw)
+        patched._mockingbird = True
+        cls.send = patched
+        return
+    if name == "aiohttp.client":
+        send = httpx.ClientSession._request
+        if getattr(send, "_mockingbird", False):
+            return
+        async def patched(self, method, url, *args, **kw):
+            headers = dict(kw.get("headers") or {})
+            redirected = _redirect_url(url, headers)
+            if redirected != url:
+                kw["headers"] = headers
+            return await send(self, method, redirected, *args, **kw)
+        patched._mockingbird = True
+        httpx.ClientSession._request = patched
+        return
     if getattr(httpx.Client.send, "_mockingbird", False):
         return
     send, asend = httpx.Client.send, httpx.AsyncClient.send
