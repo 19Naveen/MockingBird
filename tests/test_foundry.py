@@ -8,7 +8,7 @@ from unittest.mock import patch
 import urllib.error
 import urllib.request
 
-import bridge
+from mockingbird import agent, server, state
 
 
 class FoundryTests(unittest.TestCase):
@@ -16,12 +16,12 @@ class FoundryTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
-        self.settings = patch.multiple(bridge, DIR=root, CACHE=root / "cache", AUTO="fake-foundry",
+        self.settings = patch.multiple(state, DIR=root, CACHE=root / "cache", AUTO="fake-foundry",
                                        REAL=False, REPLAY=False, REDACT=False, NAMESPACE="", FAULTS=[],
                                        QUIET=True, JOURNAL=None)
         self.settings.start()
         self.addCleanup(self.settings.stop)
-        self.server = bridge.serve(0)
+        self.server = server.serve(0)
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -36,7 +36,7 @@ class FoundryTests(unittest.TestCase):
         body = {"model": "deployed-model", "messages": [{"role": "user", "content": "hello"}]}
         paths = ("/models/chat/completions?api-version=2024-05-01-preview", "/openai/v1/chat/completions",
                  "/openai/deployments/deployed-model/chat/completions?api-version=2024-06-01")
-        with patch.object(bridge, "run_auto", return_value={"text": "hello"}):
+        with patch.object(agent, "run_auto", return_value={"text": "hello"}):
             for path in paths:
                 with self.subTest(path=path):
                     content_type, data = self.post(path, body)
@@ -49,7 +49,7 @@ class FoundryTests(unittest.TestCase):
     def test_foundry_chat_streamed_tools_use_openai_events(self):
         body = {"model": "deployed-model", "stream": True, "messages": [], "tools": [{"type": "function", "function": {
             "name": "lookup", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}]}
-        with patch.object(bridge, "run_auto", return_value={"tool_calls": [{"name": "lookup", "input": {"city": "Paris"}}]}):
+        with patch.object(agent, "run_auto", return_value={"tool_calls": [{"name": "lookup", "input": {"city": "Paris"}}]}):
             content_type, data = self.post("/models/chat/completions?api-version=2024-05-01-preview", body)
         self.assertEqual(content_type, "text/event-stream")
         chunks = [json.loads(line[6:]) for line in data.splitlines() if line.startswith("data: ") and line != "data: [DONE]"]
@@ -60,7 +60,7 @@ class FoundryTests(unittest.TestCase):
 
     def test_foundry_anthropic_prefix_preserves_messages_contract(self):
         body = {"model": "claude-deployment", "max_tokens": 64, "messages": [{"role": "user", "content": "hello"}]}
-        with patch.object(bridge, "run_auto", return_value={"text": "hello"}) as answer:
+        with patch.object(agent, "run_auto", return_value={"text": "hello"}) as answer:
             _, data = self.post("/anthropic/v1/messages", body)
         reply = json.loads(data)
         self.assertEqual(reply["type"], "message")
@@ -79,8 +79,8 @@ class FoundryTests(unittest.TestCase):
         for host in ("example.services.ai.azure.com", "deployment.eastus2.models.ai.azure.com", "models.inference.ai.azure.com"):
             with self.subTest(host=host):
                 endpoint = "https://" + host
-                self.assertEqual(bridge.upstream_for("openai", {"x-mockingbird-upstream": endpoint}), endpoint)
-        self.assertIsNone(bridge.upstream_for("openai", {"x-mockingbird-upstream": "https://example.services.ai.azure.com.evil.example"}))
+                self.assertEqual(server.upstream_for("openai", {"x-mockingbird-upstream": endpoint}), endpoint)
+        self.assertIsNone(server.upstream_for("openai", {"x-mockingbird-upstream": "https://example.services.ai.azure.com.evil.example"}))
 
 
 if __name__ == "__main__":

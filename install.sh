@@ -39,7 +39,12 @@ EOF
 
 mkdir -p "$DEST"
 doing "Downloading"
-for f in SKILL.md bridge.py dashboard.py attachments.py providers_bedrock.py providers_google.py mockingbird_hook.py uninstall.sh LICENSE; do
+FILES="SKILL.md bridge.py mockingbird/__init__.py mockingbird/state.py mockingbird/log.py mockingbird/store.py
+mockingbird/responses.py mockingbird/agent.py mockingbird/answers.py mockingbird/server.py mockingbird/cli.py
+mockingbird/dashboard.py mockingbird/attachments.py mockingbird/providers/__init__.py
+mockingbird/providers/bedrock.py mockingbird/providers/google.py mockingbird_hook.py uninstall.sh LICENSE"
+for f in $FILES; do
+  mkdir -p "$DEST/$(dirname "$f")"
   if [ -n "${MOCKINGBIRD_SRC:-}" ]; then
     cp "$MOCKINGBIRD_SRC/$f" "$DEST/$f.tmp"
   elif ! curl -fsSL --connect-timeout 15 --max-time 120 --retry 2 "$BASE/$f" -o "$DEST/$f.tmp"; then

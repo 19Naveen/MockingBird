@@ -9,8 +9,8 @@ import threading
 import unittest
 import zlib
 
-import attachments
-import providers_bedrock as bedrock
+from mockingbird import attachments
+from mockingbird.providers import bedrock
 from media_fixtures import red_png
 
 

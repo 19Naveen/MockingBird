@@ -17,7 +17,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import bridge
+from mockingbird import agent, dashboard, server, state
 from anthropic import Anthropic, AsyncAnthropic
 from openai import OpenAI, AsyncOpenAI, AzureOpenAI
 from media_fixtures import red_png, text_pdf
@@ -176,11 +176,11 @@ def main():
     parser.add_argument("--model", default="codex")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="mockingbird-sdk-") as tmp:
-        bridge.DIR, bridge.CACHE = Path(tmp) / "queue", Path(tmp) / "cache"
-        bridge.AUTO = bridge.auto_cmd(args.model)
-        bridge.REAL, bridge.REDACT, bridge.REPLAY, bridge.FAULTS, bridge.NAMESPACE = False, False, False, [], ""
-        bridge.JOURNAL = bridge.dashboard.Journal(Path(tmp) / "calls.db")
-        srv = bridge.serve(0)
+        state.DIR, state.CACHE = Path(tmp) / "queue", Path(tmp) / "cache"
+        state.AUTO = agent.auto_cmd(args.model)
+        state.REAL, state.REDACT, state.REPLAY, state.FAULTS, state.NAMESPACE = False, False, False, [], ""
+        state.JOURNAL = dashboard.Journal(Path(tmp) / "calls.db")
+        srv = server.serve(0)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         url = f"http://127.0.0.1:{srv.server_port}"
         try:
@@ -188,9 +188,9 @@ def main():
                     api_key="bridge-dummy", base_url=url + "/v1", max_retries=0) as oai:
                 SDKFlow.anthropic, SDKFlow.openai, SDKFlow.url = ant, oai, url
                 for phase in ("fresh", "replay"):
-                    bridge.REPLAY = phase == "replay"
+                    state.REPLAY = phase == "replay"
                     start = time.monotonic()
-                    with patch.object(bridge, "run_auto", wraps=bridge.run_auto) as auto:
+                    with patch.object(agent, "run_auto", wraps=agent.run_auto) as auto:
                         result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(SDKFlow))
                     print(f"{args.model} {phase}: {time.monotonic() - start:.2f}s, {auto.call_count} CLI generations", flush=True)
                     if not result.wasSuccessful() or (phase == "replay" and auto.call_count):

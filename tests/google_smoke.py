@@ -11,8 +11,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import attachments
-import bridge
+from mockingbird import agent, attachments, dashboard, server, state
 from google import genai
 from google.genai import errors, types
 from google.oauth2.credentials import Credentials
@@ -76,7 +75,7 @@ class GoogleSDKTests(unittest.TestCase):
         asyncio.run(check())
 
     def test_native_rate_limit_error(self):
-        bridge.FAULTS = [{"status": 429, "error": "scripted Google rate limit"}]
+        state.FAULTS = [{"status": 429, "error": "scripted Google rate limit"}]
         with self.assertRaises(errors.ClientError) as error:
             self.client.models.generate_content(model="gemini-test", contents="Reply with exactly hello.")
         self.assertEqual(error.exception.code, 429)
@@ -110,13 +109,13 @@ def main():
     parser.add_argument("--model", help="optional stand-in CLI; omitted uses deterministic local answers")
     options = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="mockingbird-google-sdk-") as folder:
-        bridge.DIR, bridge.CACHE = Path(folder) / "queue", Path(folder) / "cache"
-        bridge.AUTO = bridge.auto_cmd(options.model) if options.model else "google-sdk-shape-check"
-        bridge.REAL, bridge.REDACT, bridge.REPLAY, bridge.FAULTS, bridge.NAMESPACE = False, False, False, [], ""
-        bridge.JOURNAL, bridge.QUIET = None, True
-        server = bridge.serve(0)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        url = f"http://127.0.0.1:{server.server_port}"
+        state.DIR, state.CACHE = Path(folder) / "queue", Path(folder) / "cache"
+        state.AUTO = agent.auto_cmd(options.model) if options.model else "google-sdk-shape-check"
+        state.REAL, state.REDACT, state.REPLAY, state.FAULTS, state.NAMESPACE = False, False, False, [], ""
+        state.JOURNAL, state.QUIET = None, True
+        server_obj = server.serve(0)
+        threading.Thread(target=server_obj.serve_forever, daemon=True).start()
+        url = f"http://127.0.0.1:{server_obj.server_port}"
         try:
             for mode in ("developer", "vertex"):
                 kwargs = {"api_key": "bridge-dummy", "vertexai": False} if mode == "developer" else {
@@ -125,9 +124,9 @@ def main():
                         retry_options=types.HttpRetryOptions(attempts=1))) as client:
                     GoogleSDKTests.client = client
                     for phase in ("fresh", "replay"):
-                        bridge.REPLAY = phase == "replay"
+                        state.REPLAY = phase == "replay"
                         start = time.monotonic()
-                        with patch.object(bridge, "run_auto", side_effect=bridge.run_auto if options.model else fixed_answer) as auto:
+                        with patch.object(agent, "run_auto", side_effect=agent.run_auto if options.model else fixed_answer) as auto:
                             result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(GoogleSDKTests))
                         print(f"google {mode} {phase}: {time.monotonic() - start:.2f}s, {auto.call_count} generations", flush=True)
                         if not result.wasSuccessful() or (phase == "replay" and auto.call_count):
@@ -135,8 +134,8 @@ def main():
             print(f"google-genai {genai.__version__}")
             return 0
         finally:
-            server.shutdown()
-            server.server_close()
+            server_obj.shutdown()
+            server_obj.server_close()
 
 
 if __name__ == "__main__":

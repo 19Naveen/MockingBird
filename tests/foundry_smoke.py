@@ -18,7 +18,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import bridge
+from mockingbird import agent, server, state, store
 
 # A user-level hook may already shadow this checkout on PYTHONPATH; exercise the checkout's copy.
 _spec = importlib.util.spec_from_file_location(
@@ -81,7 +81,7 @@ class FoundrySDKFlow(unittest.TestCase):
         self.assertEqual(reply.choices[0].message.content, "hello")
 
     def test_azure_inference_faults_become_sdk_errors(self):
-        with patch.object(bridge, "FAULTS", [{"status": 429, "error": "test rate limit"}]), self.inference() as client:
+        with patch.object(state, "FAULTS", [{"status": 429, "error": "test rate limit"}]), self.inference() as client:
             with self.assertRaises(HttpResponseError) as error:
                 client.complete(model="foundry-fault", messages=[UserMessage("hello")])
             self.assertEqual(error.exception.status_code, 429)
@@ -177,18 +177,18 @@ def main():
     if "--runner-client" in sys.argv:
         return runner_client()
     with tempfile.TemporaryDirectory(prefix="mockingbird-foundry-") as tmp:
-        bridge.DIR, bridge.CACHE = Path(tmp) / "queue", Path(tmp) / "cache"
-        bridge.AUTO, bridge.NAMESPACE = "fake-foundry-sdk", ""
-        bridge.REAL, bridge.REPLAY, bridge.REDACT, bridge.FAULTS, bridge.QUIET, bridge.JOURNAL = False, False, False, [], True, None
-        server = bridge.serve(0)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        FoundrySDKFlow.url = f"http://127.0.0.1:{server.server_port}"
+        state.DIR, state.CACHE = Path(tmp) / "queue", Path(tmp) / "cache"
+        state.AUTO, state.NAMESPACE = "fake-foundry-sdk", ""
+        state.REAL, state.REPLAY, state.REDACT, state.FAULTS, state.QUIET, state.JOURNAL = False, False, False, [], True, None
+        server_obj = server.serve(0)
+        threading.Thread(target=server_obj.serve_forever, daemon=True).start()
+        FoundrySDKFlow.url = f"http://127.0.0.1:{server_obj.server_port}"
         FoundrySDKFlow.state = str(Path(tmp) / "active.json")
-        bridge._write(Path(FoundrySDKFlow.state), {"port": server.server_port, "pid": os.getpid()})
+        store.write(Path(FoundrySDKFlow.state), {"port": server_obj.server_port, "pid": os.getpid()})
         try:
             for phase in ("fresh", "replay"):
-                bridge.REPLAY = phase == "replay"
-                with patch.object(bridge, "run_auto", side_effect=fake_answer) as answer:
+                state.REPLAY = phase == "replay"
+                with patch.object(agent, "run_auto", side_effect=fake_answer) as answer:
                     result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(FoundrySDKFlow))
                 print(f"foundry {phase}: {answer.call_count} fake stand-in calls")
                 if not result.wasSuccessful() or (phase == "replay" and answer.call_count):
@@ -209,8 +209,8 @@ def main():
             print(result.stdout.strip())
             return 0
         finally:
-            server.shutdown()
-            server.server_close()
+            server_obj.shutdown()
+            server_obj.server_close()
 
 
 if __name__ == "__main__":

@@ -14,7 +14,10 @@ from unittest.mock import patch
 import urllib.request, urllib.error
 import shlex
 
-import bridge
+from mockingbird import agent, answers, cli, dashboard, server, state, store
+
+ROOT = Path(__file__).resolve().parents[1]
+BRIDGE = ROOT / "bridge.py"
 
 # A user-level hook may already be installed and loaded by Python's .pth file. Test the checkout's copy, not that one.
 _spec = importlib.util.spec_from_file_location(
@@ -30,7 +33,7 @@ class BridgeTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         settings = dict(DIR=self.root, CACHE=self.root / "cache", AUTO="fake", REAL=False,
                         REDACT=False, REPLAY=False, NAMESPACE="", FAULTS=[], QUIET=True, JOURNAL=None)
-        self.settings = patch.multiple(bridge, **settings)
+        self.settings = patch.multiple(state, **settings)
         self.settings.start()
         self.addCleanup(self.settings.stop)
         self.req = {"model": "test", "messages": [{"role": "user", "content": "private prompt"}]}
@@ -45,7 +48,7 @@ class BridgeTests(unittest.TestCase):
             return list(pool.map(run, range(8)))
 
     def server(self):
-        srv = bridge.serve(0)
+        srv = server.serve(0)
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -61,17 +64,17 @@ class BridgeTests(unittest.TestCase):
         for text in ('prose {broken} ```json\n{"text":"nested {braces}"}\n``` extra {tail}',
                      '{"text":"hello"} and {"extra":true}'):
             with self.subTest(text=text):
-                self.assertIn("text", bridge.parse_answer(text))
+                self.assertIn("text", agent.parse_answer(text))
 
     def test_parser_rejects_invalid_shapes(self):
         for text in ('nothing', '{"text":42}', '{"tool_calls":[null]}',
                      '{"tool_calls":"bad"}', '{}', '{"error":"oops","status":"bad"}',
                      '{"raw":[]}', '{"text":"hi","stop":{}}'):
             with self.subTest(text=text), self.assertRaises(ValueError):
-                bridge.parse_answer(text)
+                agent.parse_answer(text)
 
     def test_validation_survives_optimized_python(self):
-        code = 'import bridge; bridge.parse_answer(\'{"text":42}\')'
+        code = 'from mockingbird.agent import parse_answer; parse_answer(\'{"text":42}\')'
         out = subprocess.run([sys.executable, "-O", "-c", code], capture_output=True)
         self.assertNotEqual(out.returncode, 0)
         self.assertIn(b"ValueError", out.stderr)
@@ -80,69 +83,69 @@ class BridgeTests(unittest.TestCase):
         def generate(*_):
             time.sleep(0.1)
             return {"text": "same answer"}
-        with patch.object(bridge, "run_auto", side_effect=generate) as auto:
-            replies = self.parallel(lambda i: bridge.get_answer("anthropic", "/v1/messages", self.req, str(i)))
+        with patch.object(agent, "run_auto", side_effect=generate) as auto:
+            replies = self.parallel(lambda i: answers.get_answer("anthropic", "/v1/messages", self.req, str(i)))
         self.assertEqual(auto.call_count, 1)
         self.assertEqual([s for _, s in replies].count("FRESH"), 1)
         self.assertTrue(all(a == {"text": "same answer"} for a, _ in replies))
-        self.assertEqual(len(list(bridge.CACHE.glob("*.json"))), 1)
+        self.assertEqual(len(list(state.CACHE.glob("*.json"))), 1)
 
     def test_failed_generation_is_not_cached(self):
-        with patch.object(bridge, "run_auto", return_value={"error": "failed"}) as auto:
+        with patch.object(agent, "run_auto", return_value={"error": "failed"}) as auto:
             for i in range(2):
-                bridge.get_answer("anthropic", "/v1/messages", self.req, str(i))
+                answers.get_answer("anthropic", "/v1/messages", self.req, str(i))
         self.assertEqual(auto.call_count, 2)
-        self.assertFalse(bridge.CACHE.exists())
+        self.assertFalse(state.CACHE.exists())
 
     def test_redact_bypasses_existing_cache_and_writes_nothing(self):
-        bridge.CACHE.mkdir()
-        bridge._write(bridge.cache_file(self.req, "anthropic"), {"text": "old private answer"})
-        before = list(bridge.CACHE.iterdir())
-        with patch.object(bridge, "REDACT", True), patch.object(bridge, "run_auto", return_value={"text": "new"}) as auto:
-            self.assertIsNone(bridge.cache_file(self.req))
+        state.CACHE.mkdir()
+        store.write(store.cache_file(self.req, "anthropic"), {"text": "old private answer"})
+        before = list(state.CACHE.iterdir())
+        with patch.object(state, "REDACT", True), patch.object(agent, "run_auto", return_value={"text": "new"}) as auto:
+            self.assertIsNone(store.cache_file(self.req))
             for i in range(2):
-                self.assertEqual(bridge.get_answer("anthropic", "/v1/messages", self.req, str(i))[0], {"text": "new"})
+                self.assertEqual(answers.get_answer("anthropic", "/v1/messages", self.req, str(i))[0], {"text": "new"})
         self.assertEqual(auto.call_count, 2)
-        self.assertEqual(list(bridge.CACHE.iterdir()), before)
+        self.assertEqual(list(state.CACHE.iterdir()), before)
 
     def test_cache_files_are_private_and_writes_are_atomic(self):
         path = self.root / "entry.json"
-        self.parallel(lambda i: bridge._write(path, {"text": str(i)}))
+        self.parallel(lambda i: store.write(path, {"text": str(i)}))
         self.assertIn("text", json.loads(path.read_text()))
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertFalse(list(self.root.glob("*.tmp")))
 
     def test_real_concurrent_misses_forward_once(self):
-        bridge.REAL = True
+        state.REAL = True
         url = self.server()
 
         def forward(*_):
             time.sleep(0.1)
             return 200, "application/json", b'{"content":[{"type":"text","text":"real"}]}'
-        with patch.object(bridge, "forward", side_effect=forward) as upstream:
+        with patch.object(server, "forward", side_effect=forward) as upstream:
             replies = self.parallel(lambda _: self.post(url, self.req))
         self.assertEqual(upstream.call_count, 1)
         self.assertTrue(all(r == replies[0] for r in replies))
 
     def test_real_redact_keeps_no_content_in_cache_journal_or_log(self):
-        bridge.REAL, bridge.REDACT = True, True
-        bridge.JOURNAL = bridge.dashboard.Journal(self.root / "calls.db")
+        state.REAL, state.REDACT = True, True
+        state.JOURNAL = dashboard.Journal(self.root / "calls.db")
         url = self.server()
         output = io.StringIO()
         recorded = threading.Event()
-        record = bridge.JOURNAL.record
+        record = state.JOURNAL.record
 
         def finish(*args):
             record(*args)
             recorded.set()
-        with patch.object(bridge, "QUIET", False), patch("sys.stderr", output), patch.object(
-                bridge, "forward", return_value=(200, "application/json", b'{"text":"private answer"}')), patch.object(
-                bridge.JOURNAL, "record", side_effect=finish):
+        with patch.object(state, "QUIET", False), patch("sys.stderr", output), patch.object(
+                server, "forward", return_value=(200, "application/json", b'{"text":"private answer"}')), patch.object(
+                state.JOURNAL, "record", side_effect=finish):
             self.post(url, self.req)
             self.assertTrue(recorded.wait(timeout=5))  # history is recorded after sending the response
-        self.assertFalse(bridge.CACHE.exists())
+        self.assertFalse(state.CACHE.exists())
         self.assertNotIn("private", output.getvalue())
-        calls = bridge.JOURNAL.calls()
+        calls = state.JOURNAL.calls()
         self.assertEqual(calls[0].label, "[redacted]")
         self.assertEqual(calls[0].model, "[redacted]")
         self.assertEqual(calls[0].key, "")
@@ -169,25 +172,25 @@ class BridgeTests(unittest.TestCase):
 
     def test_child_cli_cannot_inherit_hook_opt_in(self):
         with patch.dict(os.environ, MOCKINGBIRD_ENABLED="1", OPENAI_BASE_URL="http://127.0.0.1:8787/v1"), patch.object(
-                bridge, "BRIDGE_PORTS", {8787}):
-            child = bridge._child_env()
+                state, "BRIDGE_PORTS", {8787}):
+            child = agent._child_env()
         self.assertNotIn("MOCKINGBIRD_ENABLED", child)
         self.assertNotIn("OPENAI_BASE_URL", child)
 
     def test_child_cli_preserves_unrelated_local_provider_proxy(self):
-        with patch.dict(os.environ, ANTHROPIC_BASE_URL="http://localhost:20128"), patch.object(bridge, "BRIDGE_PORTS", {8787}):
-            self.assertEqual(bridge._child_env()["ANTHROPIC_BASE_URL"], "http://localhost:20128")
+        with patch.dict(os.environ, ANTHROPIC_BASE_URL="http://localhost:20128"), patch.object(state, "BRIDGE_PORTS", {8787}):
+            self.assertEqual(agent._child_env()["ANTHROPIC_BASE_URL"], "http://localhost:20128")
 
     def test_global_hook_upgrade_is_guarded_idempotent_and_reversible(self):
         rc = self.root / ".bashrc"
         original = "# existing shell\n"
         rc.write_text(original + '\n# >>> mockingbird >>>\nexport PYTHONPATH="old"\n# <<< mockingbird <<<\n')
-        with patch.object(Path, "home", return_value=self.root), patch.object(bridge, "HOOK_DIR", self.root / "hook"):
-            bridge.hook_global("install")
-            bridge.hook_global("install")
+        with patch.object(Path, "home", return_value=self.root), patch.object(cli, "HOOK_DIR", self.root / "hook"):
+            cli.hook_global("install")
+            cli.hook_global("install")
             self.assertEqual(rc.read_text().count("# >>> mockingbird >>>"), 1)
             self.assertIn('"${MOCKINGBIRD_ENABLED:-}" = 1', rc.read_text())
-            bridge.hook_global("uninstall")
+            cli.hook_global("uninstall")
         self.assertEqual(rc.read_text(), original)
 
     def test_update_uses_only_release_tag_and_pins_payloads(self):
@@ -198,9 +201,9 @@ class BridgeTests(unittest.TestCase):
             return io.BytesIO(b'{"tag_name":"v99.0.0"}' if len(urls) == 1 else b'VERSION=99.0.0\n')
         with patch("urllib.request.urlopen", side_effect=download), patch.dict(
                 os.environ, MOCKINGBIRD_SRC="untrusted", MOCKINGBIRD_BASE="untrusted"), patch.object(
-                bridge.subprocess, "run") as run, self.assertRaises(SystemExit) as exit_status:
+                cli.subprocess, "run") as run, self.assertRaises(SystemExit) as exit_status:
             run.return_value.returncode = 0
-            bridge.update()
+            cli.update()
         self.assertEqual(exit_status.exception.code, 0)
         self.assertTrue(urls[0].endswith("/releases/latest"))
         self.assertTrue(urls[1].endswith("/v99.0.0/install.sh"))
@@ -211,49 +214,49 @@ class BridgeTests(unittest.TestCase):
         for tag, script in (("main", "VERSION=99.0.0"), ("v99.0.0", "VERSION=1.0.0")):
             with self.subTest(tag=tag), patch("urllib.request.urlopen", side_effect=[
                     io.BytesIO(json.dumps({"tag_name": tag}).encode()), io.BytesIO(script.encode())]), patch.object(
-                    bridge.subprocess, "run") as run, self.assertRaises(SystemExit):
-                bridge.update()
+                    cli.subprocess, "run") as run, self.assertRaises(SystemExit):
+                cli.update()
             run.assert_not_called()
 
     def test_legacy_selftest(self):
         env = {k: v for k, v in os.environ.items() if not k.startswith("BRIDGE_") and k != "MOCKINGBIRD_ENABLED"}
-        result = subprocess.run([sys.executable, str(Path(bridge.__file__)), "selftest"], env=env,
+        result = subprocess.run([sys.executable, str(BRIDGE), "selftest"], env=env,
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_cache_isolates_backend_effort_api_and_namespace(self):
-        key = bridge.request_key(self.req, "anthropic")
-        self.assertEqual(key, bridge.request_key({**self.req, "stream": True}, "anthropic"))
-        self.assertNotEqual(key, bridge.request_key(self.req, "openai"))
-        for command in (bridge.auto_cmd("codex"), bridge.auto_cmd("sonnet[low]"), bridge.auto_cmd("sonnet[high]")):
-            with patch.object(bridge, "AUTO", command):
-                self.assertNotEqual(key, bridge.request_key(self.req, "anthropic"))
-        with patch.object(bridge, "NAMESPACE", "fixture-v1"):
-            self.assertNotEqual(key, bridge.request_key(self.req, "anthropic"))
-            with patch.object(bridge, "AUTO", bridge.auto_cmd("sonnet[low]")):
-                low = bridge.request_key(self.req, "anthropic")
-            with patch.object(bridge, "AUTO", bridge.auto_cmd("sonnet[high]")):
-                self.assertNotEqual(low, bridge.request_key(self.req, "anthropic"))
+        key = store.request_key(self.req, "anthropic")
+        self.assertEqual(key, store.request_key({**self.req, "stream": True}, "anthropic"))
+        self.assertNotEqual(key, store.request_key(self.req, "openai"))
+        for command in (agent.auto_cmd("codex"), agent.auto_cmd("sonnet[low]"), agent.auto_cmd("sonnet[high]")):
+            with patch.object(state, "AUTO", command):
+                self.assertNotEqual(key, store.request_key(self.req, "anthropic"))
+        with patch.object(state, "NAMESPACE", "fixture-v1"):
+            self.assertNotEqual(key, store.request_key(self.req, "anthropic"))
+            with patch.object(state, "AUTO", agent.auto_cmd("sonnet[low]")):
+                low = store.request_key(self.req, "anthropic")
+            with patch.object(state, "AUTO", agent.auto_cmd("sonnet[high]")):
+                self.assertNotEqual(low, store.request_key(self.req, "anthropic"))
 
     def test_offline_replay_hit_and_miss_never_generate(self):
-        with patch.object(bridge, "run_auto", return_value={"text": "saved"}):
-            bridge.get_answer("anthropic", "/v1/messages", self.req, "record")
-        bridge.REPLAY = True
-        with patch.object(bridge, "run_auto", side_effect=AssertionError("must be offline")), patch.object(
-                bridge, "wait_for_agent", side_effect=AssertionError("must be offline")):
-            self.assertEqual(bridge.get_answer("anthropic", "/v1/messages", self.req, "hit"), ({"text": "saved"}, "CACHE"))
-            miss, _ = bridge.get_answer("anthropic", "/v1/messages", {**self.req, "max_tokens": 9}, "miss")
+        with patch.object(agent, "run_auto", return_value={"text": "saved"}):
+            answers.get_answer("anthropic", "/v1/messages", self.req, "record")
+        state.REPLAY = True
+        with patch.object(agent, "run_auto", side_effect=AssertionError("must be offline")), patch.object(
+                agent, "wait_for_agent", side_effect=AssertionError("must be offline")):
+            self.assertEqual(answers.get_answer("anthropic", "/v1/messages", self.req, "hit"), ({"text": "saved"}, "CACHE"))
+            miss, _ = answers.get_answer("anthropic", "/v1/messages", {**self.req, "max_tokens": 9}, "miss")
         self.assertEqual(miss["status"], 409)
 
     def test_offline_real_replays_and_never_forwards_a_miss(self):
-        bridge.REAL = True
+        state.REAL = True
         url = self.server()
-        with patch.object(bridge, "forward", return_value=(200, "application/json", b'{"text":"saved"}')):
+        with patch.object(server, "forward", return_value=(200, "application/json", b'{"text":"saved"}')):
             self.post(url, self.req)
         # Wait for the cache writer before changing modes (the response is sent first).
-        with bridge.cache_lock(bridge.live_key(self.req, "https://api.anthropic.com", "/v1/messages")):
-            bridge.REPLAY = True
-        with patch.object(bridge, "forward", side_effect=AssertionError("must be offline")):
+        with store.cache_lock(store.live_key(self.req, "https://api.anthropic.com", "/v1/messages")):
+            state.REPLAY = True
+        with patch.object(server, "forward", side_effect=AssertionError("must be offline")):
             self.assertEqual(self.post(url, self.req), {"text": "saved"})
             with self.assertRaises(urllib.error.HTTPError) as error:
                 self.post(url, {**self.req, "max_tokens": 9})
@@ -261,19 +264,19 @@ class BridgeTests(unittest.TestCase):
         error.exception.close()
 
     def test_real_cache_isolates_azure_deployment_and_api_version(self):
-        a = bridge.live_key(self.req, "https://example.openai.azure.com", "/openai/deployments/a/chat/completions?api-version=1")
+        a = store.live_key(self.req, "https://example.openai.azure.com", "/openai/deployments/a/chat/completions?api-version=1")
         for path in ("/openai/deployments/b/chat/completions?api-version=1", "/openai/deployments/a/chat/completions?api-version=2"):
-            self.assertNotEqual(a, bridge.live_key(self.req, "https://example.openai.azure.com", path))
+            self.assertNotEqual(a, store.live_key(self.req, "https://example.openai.azure.com", path))
 
     def test_replay_rejects_disabled_cache_and_redaction(self):
         for settings in ({"CACHE": None}, {"REDACT": True}):
-            with self.subTest(settings=settings), patch.multiple(bridge, **settings), self.assertRaises(SystemExit):
-                bridge.configure(["--replay"])
+            with self.subTest(settings=settings), patch.multiple(state, **settings), self.assertRaises(SystemExit):
+                cli.configure(["--replay"])
 
     def test_scripted_errors_malformed_body_delay_and_exhaustion(self):
-        bridge.FAULTS = [{"status": 429, "error": "rate limited"}, {"body": "not-json"}, {"delay": 0.03}]
+        state.FAULTS = [{"status": 429, "error": "rate limited"}, {"body": "not-json"}, {"delay": 0.03}]
         url = self.server()
-        with patch.object(bridge, "run_auto", return_value={"text": "normal"}) as auto:
+        with patch.object(agent, "run_auto", return_value={"text": "normal"}) as auto:
             with self.assertRaises(urllib.error.HTTPError) as error:
                 self.post(url, self.req)
             self.assertEqual(error.exception.code, 429)
@@ -293,21 +296,21 @@ class BridgeTests(unittest.TestCase):
                     [{"body": {}}], [{"body": "x", "error": "y"}], [{"unknown": 1}]):
             path.write_text(json.dumps(bad))
             with self.subTest(bad=bad), self.assertRaises(SystemExit):
-                bridge.configure(["--faults", str(path)])
+                cli.configure(["--faults", str(path)])
         path.write_text('[{"delay": 0.1}, {"status": 503}, {"body": "invalid JSON"}]')
-        bridge.configure(["--faults", str(path)])
-        self.assertEqual(len(bridge.FAULTS), 3)
+        cli.configure(["--faults", str(path)])
+        self.assertEqual(len(state.FAULTS), 3)
 
     def runner(self, code, *options):
         env = {k: v for k, v in os.environ.items() if not k.startswith("BRIDGE_") and k != "MOCKINGBIRD_ENABLED"}
         env.update(BRIDGE_CACHE=str(self.root / "cache"), XDG_STATE_HOME=str(self.root / "state"))
-        return subprocess.run([sys.executable, str(Path(bridge.__file__)), "run", *options, "--",
+        return subprocess.run([sys.executable, str(BRIDGE), "run", *options, "--",
                                sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=30)
 
     def test_runner_scopes_routing_preserves_exit_and_stops_bridge(self):
         code = ('import os,json,sys; print(json.dumps({k:os.environ[k] for k in '
                 '["OPENAI_BASE_URL","MOCKINGBIRD_STATE","PYTHONPATH","OPENAI_API_KEY"]})); sys.exit(7)')
-        state_before = bridge.STATE.read_bytes() if bridge.STATE.exists() else None
+        state_before = state.STATE.read_bytes() if state.STATE.exists() else None
         result = self.runner(code, "--agent")
         self.assertEqual(result.returncode, 7, result.stderr)
         env = json.loads(result.stdout)
@@ -316,7 +319,7 @@ class BridgeTests(unittest.TestCase):
         self.assertFalse(Path(env["PYTHONPATH"].split(os.pathsep)[0]).exists())
         with self.assertRaises(OSError):
             urllib.request.urlopen(env["OPENAI_BASE_URL"].removesuffix("/v1") + "/health", timeout=1)
-        self.assertEqual(bridge.STATE.read_bytes() if bridge.STATE.exists() else None, state_before)
+        self.assertEqual(state.STATE.read_bytes() if state.STATE.exists() else None, state_before)
 
     def test_runner_hook_redirects_hardcoded_provider_urls(self):
         (self.root / "httpx.py").write_text('''
@@ -348,10 +351,10 @@ assert asyncio.run(httpx.AsyncClient().send(Request())) == "127.0.0.1"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("command ran", result.stdout)
         with self.assertRaises(SystemExit):
-            bridge.run_command(["--"])
+            cli.run_command(["--"])
 
     def test_runner_passes_command_help_without_intercepting_it(self):
-        result = subprocess.run([sys.executable, str(Path(bridge.__file__)), "run", "--agent", "--", sys.executable, "--help"],
+        result = subprocess.run([sys.executable, str(BRIDGE), "run", "--agent", "--", sys.executable, "--help"],
                                 capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("PYTHONPATH", result.stdout)
@@ -376,7 +379,7 @@ if spec and spec.loader:
 
     def test_scripted_delay_can_trigger_a_client_timeout(self):
         import socket
-        bridge.FAULTS = [{"delay": 0.1, "status": 503}]
+        state.FAULTS = [{"delay": 0.1, "status": 503}]
         url = self.server()
         request = urllib.request.Request(url + "/v1/messages", json.dumps(self.req).encode())
         with self.assertRaises(socket.timeout):
@@ -403,7 +406,7 @@ if spec and spec.loader:
         env["XDG_STATE_HOME"] = str(self.root / "state")
         ready = self.root / "ready"
         code = f'import os,time; from pathlib import Path; Path({str(ready)!r}).write_text(os.environ["MOCKINGBIRD_STATE"]); time.sleep(60)'
-        process = subprocess.Popen([sys.executable, str(Path(bridge.__file__)), "run", "--agent", "--", sys.executable, "-c", code],
+        process = subprocess.Popen([sys.executable, str(BRIDGE), "run", "--agent", "--", sys.executable, "-c", code],
                                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             deadline = time.monotonic() + 10

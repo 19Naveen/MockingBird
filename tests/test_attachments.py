@@ -9,8 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-import attachments
-import bridge
+from mockingbird import agent, answers, attachments, state, store
 from media_fixtures import red_png, text_pdf
 
 
@@ -24,7 +23,7 @@ class AttachmentTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.folder = Path(self.tmp.name)
         self.image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": encoded(red_png())}}
-        settings = patch.multiple(bridge, DIR=self.folder, AUTO="", REAL=False, REPLAY=False, REDACT=False,
+        settings = patch.multiple(state, DIR=self.folder, AUTO="", REAL=False, REPLAY=False, REDACT=False,
                                   CACHE=self.folder / "cache", NAMESPACE="", QUIET=True, JOURNAL=None, FAULTS=[])
         settings.start()
         self.addCleanup(settings.stop)
@@ -104,9 +103,9 @@ class AttachmentTests(unittest.TestCase):
                     self.assertEqual(paths[0].read_bytes(), red_png())
                     stdout = '{"text":"red"}'
                 return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
-            with self.subTest(model=model), patch.object(bridge, "AUTO", bridge.auto_cmd(model)), patch.object(
-                    bridge.subprocess, "run", side_effect=cli):
-                self.assertEqual(bridge.run_auto("anthropic", self.request(self.image), "test"), {"text": "red"})
+            with self.subTest(model=model), patch.object(state, "AUTO", agent.auto_cmd(model)), patch.object(
+                    agent.subprocess, "run", side_effect=cli):
+                self.assertEqual(agent.run_auto("anthropic", self.request(self.image), "test"), {"text": "red"})
             self.assertTrue(all(not p.exists() for p in paths))
 
     def test_temp_media_is_deleted_on_cli_timeout(self):
@@ -115,31 +114,31 @@ class AttachmentTests(unittest.TestCase):
         def timeout(argv, **_):
             paths.append(Path(argv[argv.index("--image") + 1]))
             raise subprocess.TimeoutExpired(argv, 1)
-        with patch.object(bridge, "AUTO", bridge.auto_cmd("codex")), patch.object(bridge.subprocess, "run", side_effect=timeout):
-            answer = bridge.run_auto("anthropic", self.request(self.image), "timeout")
+        with patch.object(state, "AUTO", agent.auto_cmd("codex")), patch.object(agent.subprocess, "run", side_effect=timeout):
+            answer = agent.run_auto("anthropic", self.request(self.image), "timeout")
         self.assertEqual(answer["status"], 504)
         self.assertFalse(paths[0].exists())
 
     def test_offline_image_replay_does_not_decode_or_invoke_cli(self):
-        bridge.AUTO = bridge.auto_cmd("codex")
+        state.AUTO = agent.auto_cmd("codex")
         req = self.request(self.image)
-        with patch.object(bridge, "run_auto", return_value={"text": "red"}):
-            bridge.get_answer("anthropic", "/v1/messages", req, "record")
-        bridge.REPLAY = True
+        with patch.object(agent, "run_auto", return_value={"text": "red"}):
+            answers.get_answer("anthropic", "/v1/messages", req, "record")
+        state.REPLAY = True
         with patch.object(attachments, "prepare", side_effect=AssertionError("must use fixture")):
-            self.assertEqual(bridge.get_answer("anthropic", "/v1/messages", req, "replay"), ({"text": "red"}, "CACHE"))
+            self.assertEqual(answers.get_answer("anthropic", "/v1/messages", req, "replay"), ({"text": "red"}, "CACHE"))
 
     def test_agent_can_inspect_images_until_answer_then_media_is_removed(self):
-        bridge._dirs()
+        store.dirs()
         with concurrent.futures.ThreadPoolExecutor(1) as pool:
-            future = pool.submit(bridge.wait_for_agent, "anthropic", "/v1/messages", self.request(self.image), "image-agent")
-            claimed = bridge.claim(5)
+            future = pool.submit(agent.wait_for_agent, "anthropic", "/v1/messages", self.request(self.image), "image-agent")
+            claimed = agent.claim(5)
             self.assertEqual(len(claimed), 1)
-            queued = json.loads((bridge.DIR / "claimed" / "image-agent.json").read_text())
+            queued = json.loads((state.DIR / "claimed" / "image-agent.json").read_text())
             path = Path(queued["images"][0])
             self.assertTrue(path.exists())
-            self.assertIn(str(path), bridge.prompt("image-agent"))
-            bridge.answer("image-agent", '{"text":"red"}')
+            self.assertIn(str(path), agent.prompt("image-agent"))
+            agent.answer("image-agent", '{"text":"red"}')
             self.assertEqual(future.result(timeout=5), {"text": "red"})
             self.assertFalse(path.exists())
 

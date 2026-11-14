@@ -7,7 +7,7 @@ import struct
 from urllib.parse import unquote, urlsplit
 import zlib
 
-from attachments import InputError
+from ..attachments import InputError
 
 CONTENT_TYPE = "application/vnd.amazon.eventstream"
 ROUTE = re.compile(r"/model/(.+)/(converse|converse-stream)/?$")

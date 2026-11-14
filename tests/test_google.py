@@ -5,8 +5,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-import attachments
-import providers_google as google
+from mockingbird import attachments
+from mockingbird.providers import google
 from media_fixtures import red_png
 
 
