@@ -3,7 +3,7 @@ name: mockingbird
 description: Test an app's AI features without live LLM API calls. A local stand-in endpoint catches every Anthropic/OpenAI/Azure OpenAI call the app makes, a coding-agent model (e.g. Sonnet at high effort) writes the reply, and the app gets it back in the normal API format. App code stays the same. Answers are cached, so repeat runs are instant. Use for /mockingbird, "test the AI without the API", "use a subagent instead of the LLM", or mock-free AI testing. Argument: model[effort] then an optional test command, e.g. `sonnet[high] pytest tests/ai`.
 argument-hint: "<model>[<effort>] [test command]"
 metadata:
-  version: "1.8.0"
+  version: "1.9.0"
 ---
 
 # mockingbird
@@ -31,8 +31,8 @@ If no test command is given, find the project's AI or integration test command. 
 
 Use **auto mode** unless its CLI is missing or the user asks for agent mode. In auto mode the bridge answers each request by running one lean headless CLI call. It's faster, and you don't have to keep serving requests.
 
-- `serve --model <model>[<effort>]` builds the CLI call for you. Claude models (`sonnet`, `opus`, `haiku`, full ids) use `claude -p` with no tools and a short system prompt. Models starting with `gpt`, `o<digit>` or `codex` use `codex exec`, which is unverified, so check `codex exec --help` first.
-- Check the CLI exists with `command -v claude` or `command -v codex`. If it doesn't, use agent mode.
+- Plain `serve` picks the first CLI on the machine: `claude` (Sonnet, medium effort), then `codex` (its configured model), then `opencode` (its configured model). With none of them, use agent mode.
+- `serve --model <spec>` chooses explicitly. The spec can be `sonnet[high]`, `opus[max]` or `haiku` for Claude; `codex` or `gpt-5[low]` for Codex; `opencode` or `opencode/<provider>/<model>` for opencode. The Codex and opencode paths haven't been tried against real accounts yet, so check the dashboard for errors.
 - For any other CLI, use `serve --auto '<command>'`. The command must read the prompt on stdin and print JSON on stdout.
 
 ## 3. Enable test mode

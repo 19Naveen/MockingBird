@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="v1.8.0" src="https://img.shields.io/badge/version-1.8.0-black">
+  <img alt="v1.9.0" src="https://img.shields.io/badge/version-1.9.0-black">
   <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-black">
   <img alt="zero dependencies" src="https://img.shields.io/badge/dependencies-0-black">
   <img alt="Claude Code, Codex, opencode" src="https://img.shields.io/badge/works%20with-Claude%20Code%20%7C%20Codex%20%7C%20opencode-black">
@@ -27,7 +27,7 @@ Your code doesn't change. Stop the server and everything goes back to the real A
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.8.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.9.0/install.sh | bash
 ```
 
 Then open a new terminal. The installer:
@@ -39,7 +39,7 @@ Then open a new terminal. The installer:
 
 On a machine that runs production code, skip the hook: `curl -fsSL … | MOCKINGBIRD_NO_HOOK=1 bash`.
 
-The URL is pinned to the `v1.8.0` tag, so a later push to `main` can't change what it installs. Read `install.sh` before you pipe it to bash.
+The URL is pinned to the `v1.9.0` tag, so a later push to `main` can't change what it installs. Read `install.sh` before you pipe it to bash.
 
 ## Use
 
@@ -57,9 +57,28 @@ pytest                # in another terminal, run your app or tests as usual
 | `serve --agent` | Lets a coding agent's subagents answer instead (see [SKILL.md](SKILL.md)) |
 | `stats` | Prints the analytics for every call so far |
 | `cache` | Lists the saved answers. `cache clear --yes` deletes them all |
+| `update` | Installs the newest release. Your history and saved answers stay |
+| `uninstall` | Removes mockingbird after asking. `--purge` also deletes your history and saved answers |
 | `hook status` | Shows whether the hook is active in this terminal, and whether the server is on |
 | `hook uninstall` | Removes the hook and restores your shell files exactly |
 | `selftest`, `version` | Runs the built-in checks, prints the version |
+
+## Which model answers
+
+mockingbird answers through an AI plan you already have, using that plan's own command-line tool. You need no API key and pay no API bills. With no `--model`, it uses the first tool it finds:
+
+| You have | mockingbird runs | Model it uses |
+|---|---|---|
+| Claude Code (a Claude plan) | `claude -p` | Sonnet at medium effort |
+| Codex (a ChatGPT plan) | `codex exec` | The default model in your Codex config |
+| opencode | `opencode run` | The default model in your opencode config, from any provider you set up there |
+| None of these | agent mode | A coding agent's subagents answer instead (see [SKILL.md](SKILL.md)) |
+
+To choose, pass `--model`: `sonnet[high]`, `opus[max]`, `haiku`, `codex`, `gpt-5[low]`, `opencode`, or `opencode/<provider>/<model>`.
+
+**Why Sonnet by default:** mockingbird has to imitate an API exactly. It must call the right tools with valid arguments, return valid JSON when asked, and do it fast enough that a test suite doesn't drag. Sonnet does that reliably in about 6 to 8 seconds per fresh answer. Opus is slower and costs more of your plan's usage for little gain here. Haiku is faster, but more likely to get a tool call or JSON shape wrong. Replayed answers take no time whichever model wrote them.
+
+The Codex and opencode paths are covered by the self-check, but haven't yet been tried against a real Codex or opencode account. If one misbehaves, the dashboard shows the error.
 
 ## The dashboard
 
@@ -142,11 +161,16 @@ Measured on 14/11/2026: a demo app using the official `anthropic` and `openai` S
 - The server only accepts connections from your own machine.
 - Prompts go to the model provider behind the Claude Code CLI. Saved answers include the start of what was asked, so use synthetic test data, never real personal data.
 
-## Uninstall
+## Update and uninstall
 
 ```bash
-mockingbird hook uninstall                       # restores ~/.bashrc and ~/.zshrc exactly
-rm -rf ~/.mockingbird ~/.local/bin/mockingbird ~/.agents/skills/mockingbird ~/.claude/skills/mockingbird \
-  ~/.codex/skills/mockingbird ~/.config/opencode/skills/mockingbird ~/.config/opencode/commands/mockingbird.md
-rm -rf ~/.local/state/mockingbird                # also delete the history and saved answers
+mockingbird update               # installs the newest release from GitHub
+mockingbird uninstall            # asks first, then removes everything; keeps history and saved answers
+mockingbird uninstall --purge    # also deletes your history and saved answers
+```
+
+Uninstall restores `~/.bashrc` and `~/.zshrc` exactly as they were. If the `mockingbird` command itself is broken, run the uninstaller straight from GitHub:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/main/uninstall.sh | bash -s -- --yes
 ```

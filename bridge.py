@@ -8,6 +8,8 @@
                         (prompt on stdin, JSON on stdout). --agent: a coding agent serves requests via next/answer.
                         Every call is logged (metadata only) to ~/.local/state/mockingbird/calls.db.
   stats                 print the analytics (all calls ever, across projects)
+  update                install the newest release from GitHub (your history and saved answers stay)
+  uninstall [--purge]   remove mockingbird; --purge also deletes the history and saved answers
   cache [clear --yes]   list the saved answers (or delete them all); env BRIDGE_CACHE picks another folder
   hook install|uninstall|status [PYTHON]
                         while serve runs, real Anthropic/OpenAI/Azure calls from Python go to the bridge; when it
@@ -35,12 +37,18 @@ JOURNAL = None  # dashboard.Journal while `serve` runs: every call, on disk, for
 PROJECT = Path.cwd().name  # the folder the server runs in, shown per call
 QUIET = False  # True while the dashboard owns the terminal
 
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 STATE = Path.home() / ".mockingbird" / "active.json"  # exists only while `serve` runs; the hook reads it
 CLAUDE_CMD = ('claude -p --model {m} --effort {e} --tools "" --system-prompt "You stand in for an LLM API. '
               'Follow the instructions in the user message exactly." --strict-mcp-config --disable-slash-commands '
               '--no-session-persistence')
-CODEX_CMD = "codex exec -m {m} -c model_reasoning_effort={e} -"  # unverified: codex not installed where this was built
+# Codex: prompt on stdin ("-"). Without -m it uses the model in your Codex config (your ChatGPT plan).
+# unverified: Codex was not installed where this was built.
+CODEX_CMD = "codex exec{model}{effort} -"
+# opencode takes the message as an argument, not stdin, so the prompt goes in a file it attaches.
+# Without -m it uses the default model in your opencode config (any provider you set up there).
+OPENCODE_CMD = ('opencode run --archived{model} -f {{prompt_file}} '
+                '"Follow the instructions in the attached file exactly. Reply with only the JSON object it asks for."')
 DIR = Path(os.environ.get("BRIDGE_DIR", ".llm-bridge")).resolve()
 PORT = int(os.environ.get("BRIDGE_PORT", "8787"))
 TIMEOUT = float(os.environ.get("BRIDGE_TIMEOUT", "900"))
@@ -291,13 +299,23 @@ def run_auto(api, req, rid):
     text, note, last = render(api, req, rid, auto=True), "", ""
     with SLOTS:
         for _ in range(2):  # one retry with the rejection reason, then give the app a normal API error
+            prompt_file = None
             try:
-                out = subprocess.run(shlex.split(AUTO), input=text + note, capture_output=True, text=True,
+                cmd, stdin = AUTO, text + note
+                if "{prompt_file}" in cmd:  # CLIs that take a file, not stdin (opencode)
+                    _dirs()
+                    prompt_file = DIR / f"prompt-{rid}.md"
+                    prompt_file.write_text(stdin)
+                    cmd, stdin = cmd.replace("{prompt_file}", shlex.quote(str(prompt_file))), ""
+                out = subprocess.run(shlex.split(cmd), input=stdin, capture_output=True, text=True,
                                      timeout=TIMEOUT, env=_child_env())
             except subprocess.TimeoutExpired:
                 return {"error": f"auto command gave no answer within {TIMEOUT:.0f}s", "status": 504}
             except OSError as e:
                 return {"error": f"auto command could not start: {e}", "status": 500}
+            finally:
+                if prompt_file:
+                    prompt_file.unlink(missing_ok=True)  # it holds the whole request: never leave it behind
             if out.returncode != 0:
                 return {"error": f"auto command exited {out.returncode}: {out.stderr.strip()[-300:]}", "status": 502}
             try:
@@ -388,13 +406,74 @@ def answer(rid, text):
 
 # ---------- convenience ----------
 
-def auto_cmd(spec):
-    m = re.fullmatch(r"([\w.\-/:]+)(?:\[(\w+)\])?", spec)
+REPO = "19Naveen/MockingBird"
+
+
+def _version(text):
+    return tuple(int(p) for p in re.findall(r"\d+", text)[:3])
+
+
+def update():
+    """Read the version on main, and if it's newer, run that release's installer."""
+    import tempfile, urllib.request
+    url = f"https://raw.githubusercontent.com/{REPO}/main/install.sh"
+    try:
+        script = urllib.request.urlopen(url, timeout=30).read().decode()
+    except OSError as e:
+        sys.exit(f"could not reach GitHub ({e}). Check your connection and try again.")
+    found = re.search(r"^VERSION=(\S+)", script, re.M)
+    latest = found.group(1) if found else "?"
+    if found and _version(latest) <= _version(VERSION):
+        print(f"mockingbird {VERSION} is up to date (newest release: {latest}).")
+        return
+    print(f"updating mockingbird {VERSION} -> {latest}")
+    with tempfile.NamedTemporaryFile("w", suffix="-install.sh", delete=False) as f:
+        f.write(script)
+    try:
+        code = subprocess.run(["bash", f.name]).returncode
+    finally:
+        os.unlink(f.name)
+    if code == 0 and STATE.exists():
+        print("A server is running on the old version. Press q on its dashboard and start it again.")
+    sys.exit(code)
+
+
+def _parse_spec(spec):
+    m = re.fullmatch(r"([\w.\-/:#]+)(?:\[(\w+)\])?", spec)
     if not m:
-        sys.exit(f"--model must look like sonnet[high], got {spec!r}")
-    model, effort = m.group(1), m.group(2) or "medium"
-    tmpl = CODEX_CMD if re.match(r"(gpt|o\d|codex)", model) else CLAUDE_CMD
-    return tmpl.format(m=shlex.quote(model), e=shlex.quote(effort))
+        sys.exit(f"--model must look like sonnet[high], codex, gpt-5[low] or opencode/<provider>/<model>; got {spec!r}")
+    return m.group(1), m.group(2)
+
+
+def auto_cmd(spec):
+    """Map a --model spec to the CLI that answers.
+    sonnet / opus / haiku / claude-* -> claude (your Claude plan); codex, gpt-*, o<n>-* -> codex exec (your ChatGPT
+    plan); opencode or provider/model -> opencode run (whatever you set up in opencode)."""
+    model, effort = _parse_spec(spec)
+    if model == "codex" or re.match(r"(gpt|o\d|codex)", model):
+        return CODEX_CMD.format(model="" if model == "codex" else f" -m {shlex.quote(model)}",
+                                effort=f" -c model_reasoning_effort={shlex.quote(effort)}" if effort else "")
+    if model == "opencode" or "/" in model:
+        model = model.removeprefix("opencode/")
+        return OPENCODE_CMD.format(model="" if model == "opencode" else f" -m {shlex.quote(model)}")
+    return CLAUDE_CMD.format(m=shlex.quote(model), e=shlex.quote(effort or "medium"))
+
+
+def spec_label(spec):
+    model, effort = _parse_spec(spec)
+    if model in ("codex", "opencode"):
+        return f"{model} (its default model)"
+    if model == "codex" or re.match(r"(gpt|o\d|codex)", model) or "/" in model:
+        return spec
+    return f"{model}[{effort or 'medium'}]"
+
+
+def default_spec():
+    """No --model given: use whichever plan this machine has, Claude first, then Codex, then opencode."""
+    for cli, spec in (("claude", "sonnet"), ("codex", "codex"), ("opencode", "opencode")):
+        if shutil.which(cli):
+            return spec
+    return None
 
 
 HOOK_DIR = Path.home() / ".mockingbird" / "hook"
@@ -591,6 +670,17 @@ def selftest():
     assert any(r.model == "old-model" and r.calls == 0 for r in dashboard.build([old], [], now).rows)  # idle rows stay
     stale = dashboard.Call(now - 7200, "gone", "openai", "ERROR", 0.0, 501, "x", "p")
     assert dashboard.build([stale], [], now).rows[0].state == "idle"  # errors outside the window don't stick
+    # --model specs pick the right CLI: Claude plan, ChatGPT plan via Codex, or whatever opencode is set up with
+    assert auto_cmd("sonnet").startswith("claude -p --model sonnet --effort medium")
+    assert auto_cmd("codex") == "codex exec -" and auto_cmd("gpt-5[low]") == ("codex exec -m gpt-5 "
+                                                                              "-c model_reasoning_effort=low -")
+    assert auto_cmd("opencode").startswith("opencode run --archived -f {prompt_file}")
+    assert " -m anthropic/claude-sonnet-5-5 " in auto_cmd("anthropic/claude-sonnet-5-5")
+    assert _version("1.10.0") > _version("1.9.0")
+    # CLIs that read a file instead of stdin get the prompt in a temp file that is removed afterwards
+    AUTO = f"{sys.executable} -c 'import sys, json; t = open(sys.argv[1]).read(); print(json.dumps({{\"text\": str(len(t) > 50)}}))' {{prompt_file}}"
+    assert run_auto("anthropic", {"model": "m", "messages": []}, "pf") == {"text": "True"}
+    assert not list(DIR.glob("prompt-*")), "the prompt file must be deleted"
     assert "7 calls" in dashboard.report(JOURNAL) and dashboard.duration(9000) == "2h 30m"
     assert dashboard.sparkline([0, 1, 4], 3) == "·▂█" and dashboard.sparkline([], 4) == "····"
     assert dashboard.bar(0.5, 4) == "██░░" and dashboard.bar(1.0, 3) == "███"
@@ -610,10 +700,9 @@ if __name__ == "__main__":
             AUTO = args[args.index("--auto") + 1]
         spec = args[args.index("--model") + 1] if "--model" in args else None
         if not spec and not AUTO and "--agent" not in args:
-            if shutil.which("claude"):
-                spec = "sonnet"  # sensible default; --agent for subagent mode, --model to choose
-            else:
-                log("claude CLI not found: agent mode (an agent answers via next/answer); see --model / --auto")
+            spec = default_spec()
+            if not spec:
+                log("no claude, codex or opencode CLI found: agent mode (an agent answers via next/answer)")
         if spec:
             AUTO = auto_cmd(spec)
         # Dashboard in a real terminal; plain log lines when asked, or when an agent runs us in the background.
@@ -629,7 +718,7 @@ if __name__ == "__main__":
                 threading.Thread(target=srv.serve_forever, daemon=True).start()
                 hooked = str(HOOK_DIR) in os.environ.get("PYTHONPATH", "").split(os.pathsep)
                 dashboard.run(JOURNAL, cache_dir=CACHE, meta={
-                    "mode": (f"{spec if '[' in spec else spec + '[medium]'} answers" if spec
+                    "mode": (f"{spec_label(spec)} answers" if spec
                              else "custom auto command" if AUTO else "agent mode (subagents answer)"),
                     "address": f"http://127.0.0.1:{srv.server_port}",
                     "cache": str(CACHE) if CACHE else "",
@@ -658,6 +747,11 @@ if __name__ == "__main__":
         print(f"deleted {len(entries)} saved answers; the next call to each will be asked fresh")
     elif cmd == "cache":
         print(dashboard.cache_report(CACHE, dashboard.Journal().calls()))
+    elif cmd == "uninstall":
+        script = Path(__file__).resolve().with_name("uninstall.sh")
+        os.execvp("bash", ["bash", str(script), *args])
+    elif cmd == "update":
+        update()
     elif cmd == "stats":
         print(dashboard.report(dashboard.Journal()))
     elif cmd == "next":
