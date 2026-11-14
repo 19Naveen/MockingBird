@@ -319,6 +319,25 @@ Measured on 14/11/2026: a demo app using the official `anthropic` and `openai` S
 - Prompts go to the provider behind your selected CLI. Cache entries contain prompt previews and complete answers; use synthetic test data or disable caching with `--redact`.
 - Full requests, including untrusted tool results, enter the stand-in prompt. Instructions tell it to treat them as simulation data, but prompt injection can still alter replies or induce CLI tool use. Do not feed hostile content or secrets to a CLI that has access to sensitive files, tools or networks.
 
+## Repository layout
+
+`bridge.py` is the installed entry point; it adds this folder to `sys.path` and calls the package. The implementation lives in `mockingbird/`:
+
+| Path | Responsibility |
+| --- | --- |
+| `mockingbird/cli.py` | Command-line parsing, `run`, `update`, hook install, self-check |
+| `mockingbird/server.py` | HTTP shim, provider routing, real-upstream forwarding |
+| `mockingbird/answers.py` | Cache lookup and the auto/agent answer choice |
+| `mockingbird/agent.py` | Model specs, prompt rendering, queue/claim and subprocess runs |
+| `mockingbird/responses.py` | Anthropic and OpenAI response bodies and SSE |
+| `mockingbird/providers/` | Bedrock Converse and Gemini adapters |
+| `mockingbird/store.py` | Cache keys, atomic JSON files and text helpers |
+| `mockingbird/state.py` | Runtime settings shared by every module |
+| `mockingbird/dashboard.py` | Journal, analytics and live terminal dashboard |
+| `mockingbird/attachments.py` | Inline image, text and PDF handling |
+
+`mockingbird_hook.py` stays at the repository root because users copy or install it on its own. `install.sh` downloads the root entry point, the package files and the hook.
+
 ## Tests and license
 
 ```bash

@@ -1,3 +1,7 @@
+# Unreleased
+
+- Split the implementation into the `mockingbird/` package: CLI, server, cache/answers, agent, response shaping, provider adapters and shared state. `bridge.py` remains the installed entry point and `mockingbird_hook.py` stays standalone. No command, environment variable or wire-format changes.
+
 # v1.14.0
 
 Run AI integration tests with less setup and repeat them offline.
