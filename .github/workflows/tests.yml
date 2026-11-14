@@ -17,7 +17,27 @@ jobs:
       - name: Install optional PDF renderer
         if: matrix.python == '3.14'
         run: sudo apt-get update && sudo apt-get install -y poppler-utils
-      - run: python -m unittest discover -s tests -v
+      - name: Run unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/unittest.log"
+      - name: Report failing tests
+        if: failure()
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/unittest.log"
+          if [ -f "$log" ]; then
+            while IFS= read -r line; do
+              echo "::error title=Unit test failure::$line"
+            done < <(grep -E '^(FAIL|ERROR): |^[A-Za-z]+Error: ' "$log" || true)
+            {
+              echo '### Unit test failures'
+              echo '```'
+              tail -n 120 "$log"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
       - run: bash -n install.sh uninstall.sh
   providers:
     runs-on: ubuntu-24.04
