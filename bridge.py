@@ -38,7 +38,7 @@ JOURNAL = None  # dashboard.Journal while `serve` runs: every call, on disk, for
 PROJECT = Path.cwd().name  # the folder the server runs in, shown per call
 QUIET = False  # True while the dashboard owns the terminal
 
-VERSION = "1.10.0"
+VERSION = "1.10.1"
 STATE = Path.home() / ".mockingbird" / "active.json"  # exists only while `serve` runs; the hook reads it
 CLAUDE_CMD = ('claude -p --model {m} --effort {e} --tools "" --system-prompt "You stand in for an LLM API. '
               'Follow the instructions in the user message exactly." --strict-mcp-config --disable-slash-commands '
@@ -414,7 +414,7 @@ def _version(text):
     return tuple(int(p) for p in re.findall(r"\d+", text)[:3])
 
 
-def purge_cache(folder, yes=False):
+def purge_cache(folder, yes=False, interactive=None):
     """Delete every saved answer. History stays; the next call to each answer is asked fresh."""
     files = sorted(folder.glob("*.json")) if folder.is_dir() else []
     if not files:
@@ -424,7 +424,7 @@ def purge_cache(folder, yes=False):
     print(f"This deletes {len(files)} saved answers ({size}) in {folder}.")
     print("Your call history stays. The next call to each answer will be asked fresh.")
     if not yes:
-        if not sys.stdin.isatty():
+        if not (sys.stdin.isatty() if interactive is None else interactive):
             sys.exit("Run it again with --yes to confirm.")
         if input("Delete them? [y/N] ").strip().lower() not in ("y", "yes"):
             print("Nothing was deleted.")
@@ -708,7 +708,7 @@ def selftest():
     for n in range(3):
         _write(junk / f"{n}.json", {"text": "x"})
     try:
-        purge_cache(junk)
+        purge_cache(junk, interactive=False)  # never ask here: the installer runs this with output hidden
         raise AssertionError("purge must refuse without --yes when stdin is not a terminal")
     except SystemExit:
         pass

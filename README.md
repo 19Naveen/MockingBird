@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="v1.10.0" src="https://img.shields.io/badge/version-1.10.0-black">
+  <img alt="v1.10.1" src="https://img.shields.io/badge/version-1.10.1-black">
   <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-black">
   <img alt="zero dependencies" src="https://img.shields.io/badge/dependencies-0-black">
   <img alt="Claude Code, Codex, opencode" src="https://img.shields.io/badge/works%20with-Claude%20Code%20%7C%20Codex%20%7C%20opencode-black">
@@ -27,7 +27,7 @@ Your code doesn't change. Stop the server and everything goes back to the real A
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.10.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.10.1/install.sh | bash
 ```
 
 Then open a new terminal. The installer:
@@ -39,7 +39,7 @@ Then open a new terminal. The installer:
 
 On a machine that runs production code, skip the hook: `curl -fsSL … | MOCKINGBIRD_NO_HOOK=1 bash`.
 
-The URL is pinned to the `v1.10.0` tag, so a later push to `main` can't change what it installs. Read `install.sh` before you pipe it to bash.
+The URL is pinned to the `v1.10.1` tag, so a later push to `main` can't change what it installs. Read `install.sh` before you pipe it to bash.
 
 ## Use
 

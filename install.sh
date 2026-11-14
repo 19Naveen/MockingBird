@@ -1,31 +1,43 @@
 #!/usr/bin/env bash
 # Install the mockingbird skill for Claude Code, Codex and opencode.
-#   curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.10.0/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.10.1/install.sh | bash
 # Env: MOCKINGBIRD_BASE    (raw URL to download from; defaults to this release's tag)
 #      MOCKINGBIRD_SRC     (local folder to copy from instead of downloading)
 #      MOCKINGBIRD_NO_HOOK (set to 1 to skip the global hook, e.g. on any machine that runs production code)
 set -euo pipefail
 
 NAME=mockingbird
-VERSION=1.10.0
+VERSION=1.10.1
 BASE="${MOCKINGBIRD_BASE:-https://raw.githubusercontent.com/19Naveen/MockingBird/v$VERSION}"
 DEST="$HOME/.agents/skills/$NAME"
 
 command -v python3 >/dev/null || { echo "$NAME needs python3 (3.9+)" >&2; exit 1; }
 mkdir -p "$DEST"
 
+echo "Installing $NAME v$VERSION"
+echo "  downloading files"
 for f in SKILL.md bridge.py dashboard.py mockingbird_hook.py uninstall.sh; do
   if [ -n "${MOCKINGBIRD_SRC:-}" ]; then cp "$MOCKINGBIRD_SRC/$f" "$DEST/$f.tmp"
-  else curl -fsSL "$BASE/$f" -o "$DEST/$f.tmp"; fi
+  elif ! curl -fsSL --connect-timeout 15 --max-time 120 --retry 2 "$BASE/$f" -o "$DEST/$f.tmp"; then
+    rm -f "$DEST/$f.tmp"
+    echo "Could not download $f from $BASE. Check your connection to GitHub and run the installer again." >&2
+    exit 1
+  fi
   mv "$DEST/$f.tmp" "$DEST/$f"   # never leave a half-downloaded file in place
 done
 chmod +x "$DEST/bridge.py" "$DEST/uninstall.sh"
 
-python3 "$DEST/bridge.py" selftest >/dev/null 2>&1 || { echo "$NAME: selftest failed, run: python3 $DEST/bridge.py selftest" >&2; exit 1; }
+# No stdin for child steps: under `curl | bash` stdin is the rest of this script, and nothing may wait on a key.
+echo "  running the self-check"
+limit=""
+command -v timeout >/dev/null && limit="timeout 180"
+$limit python3 "$DEST/bridge.py" selftest </dev/null >/dev/null 2>&1 \
+  || { echo "$NAME: the self-check failed. See why with: python3 $DEST/bridge.py selftest" >&2; exit 1; }
 
 # Global hook: every Python started from your shell routes LLM calls to mockingbird while its server runs.
 if [ -z "${MOCKINGBIRD_NO_HOOK:-}" ]; then
-  python3 "$DEST/bridge.py" hook install
+  echo "  installing the hook"
+  python3 "$DEST/bridge.py" hook install </dev/null
 else
   echo "skipped global hook (MOCKINGBIRD_NO_HOOK set)"
 fi
