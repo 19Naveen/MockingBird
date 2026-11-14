@@ -44,9 +44,9 @@ A request enters `api/server.py`, is identified and normalized, checked in `core
 
 ## Non-obvious constraints
 
-- Keep `bridge.py` and `mockingbird_hook.py` at the repo root. Both are copy/install surfaces. `install.sh` downloads an explicit file list, so add every new package file (including `__init__.py`) there and to the README layout table.
-- `state.PROJECT_ROOT` is `parents[3]` from `src/mockingbird/core/state.py`. Moving the package deeper or shallower breaks `run`, hook install, updates and selftest. Keep the `src/mockingbird/<subpackage>/` depth.
-- `pyproject.toml` supplies the standard src layout and console script, but `install.sh` is the supported install. `PROJECT_ROOT` assumes `bridge.py` sits three levels above `core/state.py`.
+- Keep `bridge.py`, `mockingbird_hook.py`, `pyproject.toml`, `install.sh`, `uninstall.sh` and `CHANGELOG.md` at the repository root. Installs fetch the root `bridge.py` and hook, setuptools reads `pyproject.toml` there, the release workflow reads `CHANGELOG.md`, and `PROJECT_ROOT` assumes the root entry point. `install.sh` downloads an explicit file list, so add every new package file (including `__init__.py`) there and to the README layout table.
+- `state.PROJECT_ROOT` is `parents[3]` from `src/mockingbird/core/state.py`. Moving the package deeper or shallower breaks `run`, hook install, updates and selftest. Keep the `src/mockingbird/<subpackage>/` depth; `src/mockingbird/` is the package, not a second repository root.
+- `pyproject.toml` supplies the standard src layout and console script, but `install.sh` is the supported install.
 - All mutable settings live in `src/mockingbird/core/state.py`; read them through the module (`from . import state`) and patch `state` in tests, never copy values into callers.
 - Tests are plain `unittest`. `tests/_bootstrap.py` puts `src/` on `sys.path`; import it before `mockingbird` in every test module. `tests/smoke/` deliberately has no `__init__.py`, so unit discovery skips it; its scripts add `src/` and `tests/` to `sys.path` themselves.
 - Cache and queue JSON go through `core/store.write` (temp file, `0600`, `os.replace`); don't write those files directly.
