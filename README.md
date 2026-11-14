@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="v1.9.0" src="https://img.shields.io/badge/version-1.9.0-black">
+  <img alt="v1.10.0" src="https://img.shields.io/badge/version-1.10.0-black">
   <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-black">
   <img alt="zero dependencies" src="https://img.shields.io/badge/dependencies-0-black">
   <img alt="Claude Code, Codex, opencode" src="https://img.shields.io/badge/works%20with-Claude%20Code%20%7C%20Codex%20%7C%20opencode-black">
@@ -27,7 +27,7 @@ Your code doesn't change. Stop the server and everything goes back to the real A
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.9.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.10.0/install.sh | bash
 ```
 
 Then open a new terminal. The installer:
@@ -39,7 +39,7 @@ Then open a new terminal. The installer:
 
 On a machine that runs production code, skip the hook: `curl -fsSL … | MOCKINGBIRD_NO_HOOK=1 bash`.
 
-The URL is pinned to the `v1.9.0` tag, so a later push to `main` can't change what it installs. Read `install.sh` before you pipe it to bash.
+The URL is pinned to the `v1.10.0` tag, so a later push to `main` can't change what it installs. Read `install.sh` before you pipe it to bash.
 
 ## Use
 
@@ -56,7 +56,8 @@ pytest                # in another terminal, run your app or tests as usual
 | `serve --plain` | Logs plain lines instead of drawing the dashboard (automatic with no terminal) |
 | `serve --agent` | Lets a coding agent's subagents answer instead (see [SKILL.md](SKILL.md)) |
 | `stats` | Prints the analytics for every call so far |
-| `cache` | Lists the saved answers. `cache clear --yes` deletes them all |
+| `cache` | Lists the saved answers |
+| `cache --purge` | Deletes every saved answer after asking (`--yes` skips the question). Your history stays |
 | `update` | Installs the newest release. Your history and saved answers stay |
 | `uninstall` | Removes mockingbird after asking. `--purge` also deletes your history and saved answers |
 | `hook status` | Shows whether the hook is active in this terminal, and whether the server is on |
@@ -133,7 +134,7 @@ The agent starts the server, routes your app to it, runs the tests, reports the 
 
 ## Cache and history
 
-- **Saved answers** live in `~/.local/state/mockingbird/cache/`, one cache for all projects. Delete one on the Cache tab, or all of them with `mockingbird cache clear --yes`. `BRIDGE_CACHE=off` turns the cache off. `BRIDGE_CACHE=./fixtures` keeps a separate cache in that folder, for example to commit for CI.
+- **Saved answers** live in `~/.local/state/mockingbird/cache/`, one cache for all projects. Delete one on the Cache tab, or all of them with `mockingbird cache --purge`. `BRIDGE_CACHE=off` turns the cache off. `BRIDGE_CACHE=./fixtures` keeps a separate cache in that folder, for example to commit for CI.
 - **Call history** lives in `~/.local/state/mockingbird/calls.db`. It powers the dashboard and keeps only metadata: time, model, outcome, duration, project, and tool names. It never stores prompts or answers.
 
 ## Speed

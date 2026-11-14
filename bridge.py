@@ -10,7 +10,8 @@
   stats                 print the analytics (all calls ever, across projects)
   update                install the newest release from GitHub (your history and saved answers stay)
   uninstall [--purge]   remove mockingbird; --purge also deletes the history and saved answers
-  cache [clear --yes]   list the saved answers (or delete them all); env BRIDGE_CACHE picks another folder
+  cache [--purge]       list the saved answers, or delete them all (asks first; --yes skips the question).
+                        Env BRIDGE_CACHE picks another folder
   hook install|uninstall|status [PYTHON]
                         while serve runs, real Anthropic/OpenAI/Azure calls from Python go to the bridge; when it
                         stops, they go to the real API. No args: global (every Python started from your shell,
@@ -37,7 +38,7 @@ JOURNAL = None  # dashboard.Journal while `serve` runs: every call, on disk, for
 PROJECT = Path.cwd().name  # the folder the server runs in, shown per call
 QUIET = False  # True while the dashboard owns the terminal
 
-VERSION = "1.9.0"
+VERSION = "1.10.0"
 STATE = Path.home() / ".mockingbird" / "active.json"  # exists only while `serve` runs; the hook reads it
 CLAUDE_CMD = ('claude -p --model {m} --effort {e} --tools "" --system-prompt "You stand in for an LLM API. '
               'Follow the instructions in the user message exactly." --strict-mcp-config --disable-slash-commands '
@@ -413,6 +414,26 @@ def _version(text):
     return tuple(int(p) for p in re.findall(r"\d+", text)[:3])
 
 
+def purge_cache(folder, yes=False):
+    """Delete every saved answer. History stays; the next call to each answer is asked fresh."""
+    files = sorted(folder.glob("*.json")) if folder.is_dir() else []
+    if not files:
+        print(f"The cache is already empty ({folder}).")
+        return
+    size = dashboard._size(sum(f.stat().st_size for f in files))
+    print(f"This deletes {len(files)} saved answers ({size}) in {folder}.")
+    print("Your call history stays. The next call to each answer will be asked fresh.")
+    if not yes:
+        if not sys.stdin.isatty():
+            sys.exit("Run it again with --yes to confirm.")
+        if input("Delete them? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("Nothing was deleted.")
+            return
+    for f in files:
+        f.unlink(missing_ok=True)
+    print(f"Deleted {len(files)} saved answers.")
+
+
 def update():
     """Read the version on main, and if it's newer, run that release's installer."""
     import tempfile, urllib.request
@@ -681,6 +702,20 @@ def selftest():
     AUTO = f"{sys.executable} -c 'import sys, json; t = open(sys.argv[1]).read(); print(json.dumps({{\"text\": str(len(t) > 50)}}))' {{prompt_file}}"
     assert run_auto("anthropic", {"model": "m", "messages": []}, "pf") == {"text": "True"}
     assert not list(DIR.glob("prompt-*")), "the prompt file must be deleted"
+    # cache --purge: refuses without --yes when nobody can answer the question, then empties the folder
+    junk = DIR / "purge-test"
+    junk.mkdir()
+    for n in range(3):
+        _write(junk / f"{n}.json", {"text": "x"})
+    try:
+        purge_cache(junk)
+        raise AssertionError("purge must refuse without --yes when stdin is not a terminal")
+    except SystemExit:
+        pass
+    assert len(list(junk.glob("*.json"))) == 3
+    purge_cache(junk, yes=True)
+    assert not list(junk.glob("*.json"))
+    purge_cache(junk, yes=True)  # an empty cache is not an error
     assert "7 calls" in dashboard.report(JOURNAL) and dashboard.duration(9000) == "2h 30m"
     assert dashboard.sparkline([0, 1, 4], 3) == "·▂█" and dashboard.sparkline([], 4) == "····"
     assert dashboard.bar(0.5, 4) == "██░░" and dashboard.bar(1.0, 3) == "███"
@@ -738,13 +773,8 @@ if __name__ == "__main__":
         hook(*args)
     elif cmd == "cache" and not CACHE:
         sys.exit("the cache is off (BRIDGE_CACHE=off)")
-    elif cmd == "cache" and args[:1] == ["clear"]:
-        entries = dashboard.cache_entries(CACHE, [])
-        if "--yes" not in args:
-            sys.exit(f"this deletes {len(entries)} saved answers in {CACHE}; run `mockingbird cache clear --yes`")
-        for e in entries:
-            (CACHE / f"{e.key}.json").unlink(missing_ok=True)
-        print(f"deleted {len(entries)} saved answers; the next call to each will be asked fresh")
+    elif cmd == "cache" and ("--purge" in args or args[:1] == ["clear"]):  # "clear" kept from v1.7
+        purge_cache(CACHE, yes="--yes" in args or "-y" in args)
     elif cmd == "cache":
         print(dashboard.cache_report(CACHE, dashboard.Journal().calls()))
     elif cmd == "uninstall":

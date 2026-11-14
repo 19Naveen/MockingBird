@@ -3,7 +3,7 @@ name: mockingbird
 description: Test an app's AI features without live LLM API calls. A local stand-in endpoint catches every Anthropic/OpenAI/Azure OpenAI call the app makes, a coding-agent model (e.g. Sonnet at high effort) writes the reply, and the app gets it back in the normal API format. App code stays the same. Answers are cached, so repeat runs are instant. Use for /mockingbird, "test the AI without the API", "use a subagent instead of the LLM", or mock-free AI testing. Argument: model[effort] then an optional test command, e.g. `sonnet[high] pytest tests/ai`.
 argument-hint: "<model>[<effort>] [test command]"
 metadata:
-  version: "1.9.0"
+  version: "1.10.0"
 ---
 
 # mockingbird
@@ -88,7 +88,7 @@ In both modes:
 
 - Successful answers are saved in `~/.local/state/mockingbird/cache/` (one cache for all projects), keyed by a hash of the request without `stream`. The next identical request is answered instantly with the same answer, so repeat runs are fast and give the same results.
 - Errors are never cached.
-- `mockingbird cache` lists the saved answers. `mockingbird cache clear --yes` deletes them all, and the dashboard's Cache tab deletes one. `BRIDGE_CACHE=off` skips the cache entirely.
+- `mockingbird cache` lists the saved answers. `mockingbird cache --purge --yes` deletes them all, and the dashboard's Cache tab deletes one. `BRIDGE_CACHE=off` skips the cache entirely.
 - Requests that embed timestamps or random ids never hit the cache. Tell the user if the bridge log shows no `replayed` lines on a second run.
 - For CI fixtures, use `BRIDGE_CACHE=./fixtures`. The user must first check that no personal data is in it (PDPA), then remove its `.gitignore`.
 
