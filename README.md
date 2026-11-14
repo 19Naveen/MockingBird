@@ -8,6 +8,7 @@
 </pre>
 
 <p align="center">
+  <strong>Local LLM API bridge, record/replay proxy &amp; fault simulator</strong><br>
   <em>It mimics the API, so your tests don't need it.</em>
 </p>
 
@@ -16,15 +17,28 @@
   <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-black">
   <img alt="zero Python dependencies" src="https://img.shields.io/badge/Python_dependencies-0-black">
   <img alt="Claude Code, Codex, opencode" src="https://img.shields.io/badge/works%20with-Claude%20Code%20%7C%20Codex%20%7C%20opencode-black">
+  <img alt="MIT License" src="https://img.shields.io/badge/license-MIT-black">
 </p>
 
-Your app's AI features call Anthropic, OpenAI, Azure AI Foundry, Amazon Bedrock or Google Gemini. In tests, that costs money, needs keys, and gives a different answer every run. mockingbird catches those calls on your machine, lets Claude Code, Codex or opencode answer through your existing login, and saves successful answers. Repeating the same request replays the saved content.
+Your app's AI features call Anthropic, OpenAI, Azure AI Foundry, Amazon Bedrock or Google Gemini. Testing against those APIs is slow, non-deterministic and burns credits. **MockingBird** catches the calls locally, lets Claude Code, Codex or opencode answer through your existing login, and saves successful answers. Repeating a request replays the saved content instantly — no model, no keys, no network.
 
-Your application code doesn't change. Route only your test process to the bridge using SDK environment variables or the optional hook.
+Your application code doesn't change. Route only the test process to the bridge with SDK environment variables or the optional hook.
 
 <p align="center"><img src="docs/live.png" alt="The Live tab: a chart of calls, a row per model, and what each recent call asked" width="100%"></p>
 
+## What you get
+
+- **No extra API spend:** fresh answers come from the Claude Code, Codex or opencode plan you already have.
+- **No code changes:** route only the test process with SDK base URLs, in any language; the optional Python hook catches hard-coded provider URLs.
+- **Deterministic record and replay:** identical requests return saved answers; CI needs no model login, API key or network. A replay miss fails fast with HTTP `409`.
+- **Five provider surfaces:** Anthropic Messages, OpenAI Chat Completions, Azure OpenAI/Foundry, Gemini/Vertex AI and Amazon Bedrock Converse, including SSE streaming, tool calls and image/PDF inputs.
+- **Real-API caching:** `--real` replays unchanged steps and forwards only new or changed calls with your own keys.
+- **Fault injection:** `--faults` scripts rate limits, outages, latency and malformed bodies without touching application code.
+- **Stdlib only:** Python 3.9+, zero runtime dependencies, and a live terminal dashboard.
+
 ## Install
+
+MockingBird needs Python 3.9+ and no third-party Python packages. Poppler is optional, for PDF inputs.
 
 Install the current code from `main`:
 
@@ -81,7 +95,6 @@ Native provider SDKs use their own endpoints:
 
 Set the matching dummy key as well: `ANTHROPIC_FOUNDRY_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` to `bridge-dummy`. For Bedrock, set `AWS_EC2_METADATA_DISABLED=true` so boto3 does not look for instance credentials. Vertex AI uses Application Default Credentials: the opt-in hook supplies dummy credentials while the bridge runs; without the hook, pass a dummy token in the test client. `mockingbird run` sets all of these for the child command.
 
-
 If your app hard-codes its provider URL, use an optional hook in its Python environment:
 
 ```bash
@@ -94,7 +107,7 @@ The hook does not patch `httpx` or `httpx2` unless the process starts with `MOCK
 | Command | What it does |
 |---|---|
 | `run [serve options] -- COMMAND` | Runs a command against its own temporary bridge, then cleans up |
-| `serve` | Starts the server and the dashboard. Sonnet answers, at medium effort |
+| `serve` | Starts the server and dashboard. With no `--model`, the first available CLI answers (Claude Code → Codex → opencode), or agent mode if none is installed |
 | `serve --real` | Uses the real API with your own keys, and replays any call it has seen before ([below](#real-api-with-repeats-replayed)) |
 | `serve --model opus[max]` | Picks the model and effort, such as `sonnet[high]` or `haiku` |
 | `serve --plain` | Logs plain lines instead of drawing the dashboard (automatic with no terminal) |
@@ -296,10 +309,10 @@ For data you do not want cached, use `mockingbird serve --redact` (or `BRIDGE_RE
 
 Measured on 14/11/2026: a demo app using the official `anthropic` and `openai` SDKs, with six tests making 8 AI calls (forced tool choice, two multi-turn tool loops, JSON mode and streaming). Sonnet answered at high effort.
 
-| Run | Result | Time |
-|---|---|---|
-| First run, every answer fresh | 6 of 6 passed, about 7 s per call | 62 s |
-| Second run, every answer replayed | 6 of 6 passed | **under 2 s** |
+| Run | Result | Time | API cost |
+|---|---|---|---|
+| First run, every answer fresh | 6 of 6 passed, about 7 s per call | 62 s | **$0** (uses your plan) |
+| Second run, every answer replayed | 6 of 6 passed | **under 2 s** | **$0** |
 
 ## Limits
 
