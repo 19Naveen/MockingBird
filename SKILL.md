@@ -1,0 +1,115 @@
+---
+name: mockingbird
+description: Test an app's AI features without live LLM API calls. A local stand-in endpoint catches every Anthropic/OpenAI/Azure OpenAI call the app makes, a coding-agent model (e.g. Sonnet at high effort) writes the reply, and the app gets it back in the normal API format. App code stays the same. Answers are cached, so repeat runs are instant. Use for /mockingbird, "test the AI without the API", "use a subagent instead of the LLM", or mock-free AI testing. Argument: model[effort] then an optional test command, e.g. `sonnet[high] pytest tests/ai`.
+argument-hint: "<model>[<effort>] [test command]"
+metadata:
+  version: "1.8.0"
+---
+
+# mockingbird
+
+The app under test keeps calling its LLM SDK as usual. `bridge.py` is a local HTTP endpoint that looks like the API to the SDK. It gets each answer from the chosen model, builds a real API response from it, and returns that to the SDK. The app's business logic never knows the difference.
+
+```
+                                   ┌─ cache hit ─► instant replay (~/.local/state/mockingbird/cache)
+app ──SDK──► bridge.py serve ──────┼─ auto mode ─► runs `claude -p --model <m> …` itself      (default)
+          (127.0.0.1:8787)         └─ agent mode ► queue file → you spawn a subagent → `answer`
+```
+
+`BRIDGE=<this skill's dir>/bridge.py` in the commands below. It needs only stdlib Python 3.
+
+## 1. Parse the argument
+
+The format is `<model>[<effort>] [test command]`. Examples:
+- `sonnet[high]` gives model `sonnet` and effort `high`.
+- `opus[max] pytest -k ai` adds a test command.
+- `haiku` gives the default effort, `medium`.
+
+If no test command is given, find the project's AI or integration test command. Ask only if you cannot find one.
+
+## 2. Pick the mode
+
+Use **auto mode** unless its CLI is missing or the user asks for agent mode. In auto mode the bridge answers each request by running one lean headless CLI call. It's faster, and you don't have to keep serving requests.
+
+- `serve --model <model>[<effort>]` builds the CLI call for you. Claude models (`sonnet`, `opus`, `haiku`, full ids) use `claude -p` with no tools and a short system prompt. Models starting with `gpt`, `o<digit>` or `codex` use `codex exec`, which is unverified, so check `codex exec --help` first.
+- Check the CLI exists with `command -v claude` or `command -v codex`. If it doesn't, use agent mode.
+- For any other CLI, use `serve --auto '<command>'`. The command must read the prompt on stdin and print JSON on stdout.
+
+## 3. Enable test mode
+
+1. Start the bridge in the background, from the project folder (the cache lives there), and keep it running until step 7. Run in the background, it logs plain lines instead of drawing its dashboard:
+   ```bash
+   python3 "$BRIDGE" serve --model <model>[<effort>]   # auto mode
+   python3 "$BRIDGE" serve --agent                     # agent mode (plain `serve` defaults to sonnet[medium])
+   # env: BRIDGE_PORT=8787 BRIDGE_TIMEOUT=900 BRIDGE_PARALLEL=4 BRIDGE_CACHE=<folder>|off (default ~/.local/state/mockingbird/cache)
+   ```
+2. Route the app's calls to the bridge. Pick one way:
+   - **A. Hook (Python apps, preferred): no env vars, no code changes.** The installer sets up a global hook. Check it with `python3 "$BRIDGE" hook status`. Your own shell may be an older snapshot without the hook's `PYTHONPATH`, so run the tests through `zsh -ic '…'` or `bash -ic '…'` (a fresh terminal), or install the hook into the app's own environment:
+     ```bash
+     python3 "$BRIDGE" hook install <app's python, e.g. .venv/bin/python>
+     python3 "$BRIDGE" hook status  <same python>   # shows hook + whether the bridge is running
+     ```
+     While `serve` runs, hooked Python's calls to `api.anthropic.com`, `api.openai.com` and `*.openai.azure.com` go to the bridge. This works through the official SDKs, including the `httpx2` the current versions use. When `serve` stops, calls go to the real API again, with the app's real keys. Never install the hook in a production environment or image. `hook uninstall <python>` removes it.
+   - **B. Env vars (any language).** Point the SDK at the bridge with a dummy key, so a call that misses the bridge fails auth instead of being billed:
+
+   | SDK | Env for the test process only |
+   |---|---|
+   | Anthropic | `ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_API_KEY=bridge-dummy` |
+   | OpenAI | `OPENAI_BASE_URL=http://127.0.0.1:8787/v1 OPENAI_API_KEY=bridge-dummy` |
+   | Azure OpenAI | `AZURE_OPENAI_ENDPOINT=http://127.0.0.1:8787 AZURE_OPENAI_API_KEY=bridge-dummy` |
+
+   Some apps hard-code `base_url` or keep it in settings. If so, override that one setting in the test config only, never in business logic. Grep for `base_url`, `BASE_URL` and `endpoint` to check. The bridge removes these vars from the auto CLI's environment, so even if they leak into the bridge's shell, the CLI can't call itself in a loop.
+3. A fresh answer takes about 5–15 s in auto mode and 10–60 s in agent mode. If the app sets a short client timeout, raise it in the test config only.
+
+## 4. Run the tests
+
+**Auto mode:** run the test command with the env from step 3 and wait for it to finish. Nothing else is needed. The bridge prints one line per request (`received`, `replayed from cache`, `answered`).
+- The bridge handles bad replies itself: it retries once, telling the model why the reply was rejected, then returns a normal API error. Errors are 500 (rejected twice), 502 (the CLI exited non-zero, for example not logged in) and 504 (`BRIDGE_TIMEOUT`).
+- Up to `BRIDGE_PARALLEL` CLI calls run at once.
+
+**Agent mode:** start the tests in the background, then repeat these steps while they run:
+1. Run `python3 "$BRIDGE" next --wait 30`. It claims every pending request and prints one JSON line each (`id`, `api`, `model`, `stream`, message and tool counts). Exit 1 means nothing is pending. Check whether the tests are still running, then repeat.
+2. For **each** id, start one subagent on the chosen model and effort, all in the same turn so they run in parallel. Give each one this prompt:
+   > Run `python3 <BRIDGE> prompt <id>` and do exactly what it says.
+
+   It reads the full request and submits its reply with `python3 <BRIDGE> answer <id>`. Request contents never enter your own context.
+   - **Claude Code**: use the Agent tool with `model: "<model>"` and `effort: "<effort>"`. The user named the effort, so pass it as written.
+   - **Codex, opencode, others**: run `python3 "$BRIDGE" prompt ID | <AUTO_CMD> | python3 "$BRIDGE" answer ID`.
+3. Handle errors:
+   - **`answer rejected: …`**: re-run that subagent once with the message added. If it fails again, submit `{"error": "<reason>", "status": 500}`.
+   - **No answer within `BRIDGE_TIMEOUT`**: the bridge returns 504. SDK retries arrive as new ids. Serve the new id and ignore the old one.
+   - **Test the app's retry logic**: submit `{"error": "overloaded", "status": 529}` or `429` on purpose.
+
+In both modes:
+- **Unsupported endpoint** (`count_tokens`, OpenAI `/responses`, embeddings, Gemini, …): the bridge returns 501 with the path. Report it to the user. Never reroute it to the live API.
+- **Exact response needed** (thinking blocks, citations, logprobs): a reply of `{"raw": <full provider response body>}` is returned as is.
+
+## 5. Cache (replay)
+
+- Successful answers are saved in `~/.local/state/mockingbird/cache/` (one cache for all projects), keyed by a hash of the request without `stream`. The next identical request is answered instantly with the same answer, so repeat runs are fast and give the same results.
+- Errors are never cached.
+- `mockingbird cache` lists the saved answers. `mockingbird cache clear --yes` deletes them all, and the dashboard's Cache tab deletes one. `BRIDGE_CACHE=off` skips the cache entirely.
+- Requests that embed timestamps or random ids never hit the cache. Tell the user if the bridge log shows no `replayed` lines on a second run.
+- For CI fixtures, use `BRIDGE_CACHE=./fixtures`. The user must first check that no personal data is in it (PDPA), then remove its `.gitignore`.
+
+## 6. Reply format (what `answer` and auto mode accept)
+
+```json
+{"text": "assistant reply", "tool_calls": [{"name": "tool", "input": {}}], "stop": "end_turn"}
+```
+- Text around the JSON (prose, code fences) is tolerated. The outermost `{…}` is used.
+- `stop` is optional. It is inferred as `tool_use` when tool calls are present, otherwise `end_turn`. It maps to OpenAI's `stop`, `tool_calls` and `length`.
+- The bridge adds ids, usage (all zeros), model and finish reason in the request's own format. If the request set `stream: true`, it sends the same data as SSE events.
+
+## 7. Disable test mode and clean up
+
+1. When the tests finish, stop `bridge.py serve`.
+2. Hook: nothing to do, since stopping `serve` already sends calls to the real API. Env vars: unset them or close that shell.
+3. `rm -rf .llm-bridge` (agent-mode leftovers after a crash). Keep the cache unless the user wants fresh answers.
+4. Report the test results, plus the number of requests answered fresh and replayed from cache, and any errors or 501s.
+
+## Limits to tell the user
+
+- Replies come from a different model acting as the target model. Fresh answers vary from run to run and won't match production quality exactly, so test the app's flow and parsing, not the exact wording.
+- Token usage is always 0. Tests that check cost or usage numbers will not match.
+- Prompts still go to the CLI's model provider. Use synthetic test data, not real personal data.
