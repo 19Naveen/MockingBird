@@ -32,7 +32,7 @@ If no test command is given, find the project's AI or integration test command. 
 Use **auto mode** unless its CLI is missing or the user asks for agent mode. In auto mode the bridge answers each request by running one lean headless CLI call. It's faster, and you don't have to keep serving requests.
 
 - Plain `serve` picks the first CLI on the machine: `claude` (Sonnet, medium effort), then `codex` (its configured model), then `opencode` (its configured model). With none of them, use agent mode.
-- `serve --model <spec>` chooses explicitly. The spec can be `sonnet[high]`, `opus[max]` or `haiku` for Claude; `codex` or `gpt-5[low]` for Codex; `opencode` or `opencode/<provider>/<model>` for opencode. The Codex and opencode paths haven't been tried against real accounts yet, so check the dashboard for errors.
+- `serve --model <spec>` chooses explicitly. The spec can be `sonnet[high]`, `opus[max]` or `haiku` for Claude; `codex` or `gpt-5[low]` for Codex; `opencode` or `opencode/<provider>/<model>` for opencode. The opencode path is tested end to end. The Codex path hasn't been tried against a real account yet, so check the dashboard for errors.
 - For any other CLI, use `serve --auto '<command>'`. The command must read the prompt on stdin and print JSON on stdout.
 
 ## 3. Enable test mode

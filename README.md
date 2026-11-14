@@ -80,7 +80,7 @@ To choose, pass `--model`: `sonnet[high]`, `opus[max]`, `haiku`, `codex`, `gpt-5
 
 **Why Sonnet by default:** mockingbird has to imitate an API exactly. It must call the right tools with valid arguments, return valid JSON when asked, and do it fast enough that a test suite doesn't drag. Sonnet does that reliably in about 6 to 8 seconds per fresh answer. Opus is slower and costs more of your plan's usage for little gain here. Haiku is faster, but more likely to get a tool call or JSON shape wrong. Replayed answers take no time whichever model wrote them.
 
-The Codex and opencode paths are covered by the self-check, but haven't yet been tried against a real Codex or opencode account. If one misbehaves, the dashboard shows the error.
+**Tested with opencode** 2.3.0 and its default model on 14/11/2026: the demo suite (6 tests, 8 calls, including tool loops, JSON mode and streaming) passed with every fresh answer written by opencode, at about 3 s per call, and the second run replayed in under a second. The Codex path is covered by the self-check but hasn't been tried against a real Codex account yet. If it misbehaves, the dashboard shows the error.
 
 ## Real API, with repeats replayed
 
