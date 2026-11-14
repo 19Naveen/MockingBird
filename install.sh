@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Install mockingbird.
-#   curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.12.0/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/v1.12.1/install.sh | bash
 # Env: MOCKINGBIRD_BASE    (raw URL to download from; defaults to this release's tag)
 #      MOCKINGBIRD_SRC     (local folder to copy from instead of downloading)
 #      MOCKINGBIRD_NO_HOOK (set to 1 to skip the hook, e.g. on any machine that runs production code)
 set -euo pipefail
 
 NAME=mockingbird
-VERSION=1.12.0
+VERSION=1.12.1
 REPO_URL=https://github.com/19Naveen/MockingBird
 BASE="${MOCKINGBIRD_BASE:-https://raw.githubusercontent.com/19Naveen/MockingBird/v$VERSION}"
 # The skill lives only in the shared skills folder; nothing goes into agent-specific folders.
@@ -71,7 +71,14 @@ else
 fi
 
 mkdir -p "$HOME/.local/bin"
-ln -sfn "$DEST/bridge.py" "$HOME/.local/bin/$NAME"
+# A launcher, not a symlink: the command keeps working even if bridge.py loses its execute bit.
+rm -f "$HOME/.local/bin/$NAME"
+cat > "$HOME/.local/bin/$NAME" <<EOF
+#!/bin/sh
+# mockingbird launcher (written by install.sh; uninstall removes it)
+exec python3 "$DEST/bridge.py" "\$@"
+EOF
+chmod +x "$HOME/.local/bin/$NAME"
 done_ "Command ${B}mockingbird${X} added to ~/.local/bin"
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) note "Add ~/.local/bin to your PATH to use it" ;; esac
 

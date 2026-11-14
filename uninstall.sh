@@ -59,7 +59,7 @@ for name in sys.argv[1:]:
 PY
 
 rm -rf "$HOME/.mockingbird"
-if [ -L "$HOME/.local/bin/$NAME" ]; then
+if [ -L "$HOME/.local/bin/$NAME" ] || grep -q "mockingbird launcher" "$HOME/.local/bin/$NAME" 2>/dev/null; then
   rm "$HOME/.local/bin/$NAME"
   echo "removed ~/.local/bin/$NAME"
 fi
