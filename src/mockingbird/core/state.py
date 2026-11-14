@@ -11,7 +11,9 @@ import os
 import threading
 from pathlib import Path
 
-from . import dashboard
+from ..ui import dashboard
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]  # the checkout or installed tree that holds bridge.py
 
 VERSION = "1.14.0"
 

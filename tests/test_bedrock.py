@@ -9,8 +9,9 @@ import threading
 import unittest
 import zlib
 
-from mockingbird import attachments
-from mockingbird.providers import bedrock
+import _bootstrap  # noqa: F401  (puts src/ on sys.path before the package imports)
+from mockingbird.api.providers import bedrock
+from mockingbird.media import attachments
 from media_fixtures import red_png
 
 

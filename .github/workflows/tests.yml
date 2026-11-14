@@ -30,9 +30,9 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y poppler-utils
           python -m pip install --quiet google-genai azure-ai-inference aiohttp openai anthropic boto3
-      - run: python tests/google_smoke.py
-      - run: python tests/foundry_smoke.py
-      - run: python tests/bedrock_smoke.py
+      - run: python tests/smoke/google_smoke.py
+      - run: python tests/smoke/foundry_smoke.py
+      - run: python tests/smoke/bedrock_smoke.py
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [test, providers]

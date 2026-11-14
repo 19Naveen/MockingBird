@@ -4,7 +4,7 @@ import json
 import re
 from urllib.parse import unquote, urlsplit
 
-from ..attachments import InputError
+from ...media.attachments import InputError
 
 CONTENT_TYPE = "text/event-stream"
 _ROUTE = re.compile(

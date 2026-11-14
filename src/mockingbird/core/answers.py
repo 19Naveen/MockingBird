@@ -3,7 +3,8 @@
 import json
 import time
 
-from . import agent, dashboard, log, state, store
+from ..ui import dashboard
+from . import agent, log, state, store
 
 
 def get_answer(api, path, req, rid):

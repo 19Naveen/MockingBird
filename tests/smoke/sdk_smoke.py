@@ -1,4 +1,4 @@
-"""Opt-in SDK check: python tests/sdk_smoke.py --model codex|sonnet|opencode.
+"""Opt-in SDK check: python tests/smoke/sdk_smoke.py --model codex|sonnet|opencode.
 
 Requires openai and anthropic in the test environment only. Runs twice with
 an isolated cache; the second pass is offline and must not invoke any CLI.
@@ -16,8 +16,11 @@ import time
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mockingbird import agent, dashboard, server, state
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # tests/media_fixtures.py
+from mockingbird.api import server
+from mockingbird.core import agent, state
+from mockingbird.ui import dashboard
 from anthropic import Anthropic, AsyncAnthropic
 from openai import OpenAI, AsyncOpenAI, AzureOpenAI
 from media_fixtures import red_png, text_pdf

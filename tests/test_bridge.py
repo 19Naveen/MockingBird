@@ -14,7 +14,11 @@ from unittest.mock import patch
 import urllib.request, urllib.error
 import shlex
 
-from mockingbird import agent, answers, cli, dashboard, server, state, store
+import _bootstrap  # noqa: F401  (puts src/ on sys.path before the package imports)
+from mockingbird import cli
+from mockingbird.api import server
+from mockingbird.core import agent, answers, state, store
+from mockingbird.ui import dashboard
 
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "bridge.py"
@@ -74,8 +78,9 @@ class BridgeTests(unittest.TestCase):
                 agent.parse_answer(text)
 
     def test_validation_survives_optimized_python(self):
-        code = 'from mockingbird.agent import parse_answer; parse_answer(\'{"text":42}\')'
-        out = subprocess.run([sys.executable, "-O", "-c", code], capture_output=True)
+        code = 'from mockingbird.core.agent import parse_answer; parse_answer(\'{"text":42}\')'
+        env = {**os.environ, "PYTHONPATH": str(ROOT / "src") + os.pathsep + os.environ.get("PYTHONPATH", "")}
+        out = subprocess.run([sys.executable, "-O", "-c", code], capture_output=True, env=env)
         self.assertNotEqual(out.returncode, 0)
         self.assertIn(b"ValueError", out.stderr)
 
@@ -154,7 +159,7 @@ class BridgeTests(unittest.TestCase):
         code = ('import sys; before = list(sys.meta_path); import mockingbird_hook; '
                 'assert sys.meta_path == before')
         env = {k: v for k, v in os.environ.items() if k != "MOCKINGBIRD_ENABLED"}
-        subprocess.run([sys.executable, "-c", code], env=env, check=True)
+        subprocess.run([sys.executable, "-c", code], env=env, cwd=ROOT, check=True)
 
     def test_hook_requires_opt_in_for_each_redirect(self):
         class URL:

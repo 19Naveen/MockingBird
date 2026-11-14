@@ -39,10 +39,15 @@ EOF
 
 mkdir -p "$DEST"
 doing "Downloading"
-FILES="SKILL.md bridge.py mockingbird/__init__.py mockingbird/state.py mockingbird/log.py mockingbird/store.py
-mockingbird/responses.py mockingbird/agent.py mockingbird/answers.py mockingbird/server.py mockingbird/cli.py
-mockingbird/dashboard.py mockingbird/attachments.py mockingbird/providers/__init__.py
-mockingbird/providers/bedrock.py mockingbird/providers/google.py mockingbird_hook.py uninstall.sh LICENSE"
+FILES="SKILL.md bridge.py pyproject.toml
+src/mockingbird/__init__.py src/mockingbird/__main__.py src/mockingbird/cli.py
+src/mockingbird/core/__init__.py src/mockingbird/core/state.py src/mockingbird/core/log.py
+src/mockingbird/core/store.py src/mockingbird/core/agent.py src/mockingbird/core/answers.py
+src/mockingbird/api/__init__.py src/mockingbird/api/responses.py src/mockingbird/api/server.py
+src/mockingbird/api/providers/__init__.py src/mockingbird/api/providers/bedrock.py
+src/mockingbird/api/providers/google.py src/mockingbird/media/__init__.py
+src/mockingbird/media/attachments.py src/mockingbird/ui/__init__.py
+src/mockingbird/ui/dashboard.py mockingbird_hook.py uninstall.sh LICENSE"
 for f in $FILES; do
   mkdir -p "$DEST/$(dirname "$f")"
   if [ -n "${MOCKINGBIRD_SRC:-}" ]; then

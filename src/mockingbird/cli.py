@@ -48,10 +48,12 @@ import threading
 import time
 from pathlib import Path
 
-from . import agent, dashboard, log, responses, server, state, store
+from .api import responses, server
+from .core import agent, log, state, store
+from .ui import dashboard
 
 REPO = "19Naveen/MockingBird"
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = state.PROJECT_ROOT
 
 HOOK_DIR = Path.home() / ".mockingbird" / "hook"
 RC_FILES = (".bashrc", ".zshrc")

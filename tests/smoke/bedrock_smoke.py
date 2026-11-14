@@ -1,6 +1,6 @@
 """End-to-end boto3 transport/runner check; uses a local fake CLI, never AWS or model access.
 
-Run with boto3 installed: python tests/bedrock_smoke.py
+Run with boto3 installed: python tests/smoke/bedrock_smoke.py
 """
 import argparse
 from contextlib import closing
@@ -78,7 +78,7 @@ def main():
     if options.client:
         client_check(options.client)
         return
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     with tempfile.TemporaryDirectory(prefix="mockingbird-bedrock-smoke-") as folder:
         folder = Path(folder)
         fake = folder / "fake_cli.py"

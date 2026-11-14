@@ -7,7 +7,9 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import answers, attachments, dashboard, log, state, store
+from ..core import answers, log, state, store
+from ..media import attachments
+from ..ui import dashboard
 from .providers import PROVIDERS
 from .responses import anthropic_body, anthropic_sse, openai_body, openai_sse
 

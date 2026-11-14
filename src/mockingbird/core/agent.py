@@ -15,10 +15,11 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import attachments, state
+from ..media import attachments
+from . import state
 from .store import dirs, write
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = state.PROJECT_ROOT
 BRIDGE_SCRIPT = ROOT / "bridge.py"
 
 

@@ -9,7 +9,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from mockingbird import agent, answers, attachments, state, store
+import _bootstrap  # noqa: F401  (puts src/ on sys.path before the package imports)
+from mockingbird.core import agent, answers, state, store
+from mockingbird.media import attachments
 from media_fixtures import red_png, text_pdf
 
 

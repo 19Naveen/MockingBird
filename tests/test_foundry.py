@@ -8,7 +8,9 @@ from unittest.mock import patch
 import urllib.error
 import urllib.request
 
-from mockingbird import agent, server, state
+import _bootstrap  # noqa: F401  (puts src/ on sys.path before the package imports)
+from mockingbird.api import server
+from mockingbird.core import agent, state
 
 
 class FoundryTests(unittest.TestCase):

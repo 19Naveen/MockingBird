@@ -10,8 +10,12 @@ import time
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mockingbird import agent, attachments, dashboard, server, state
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # tests/media_fixtures.py
+from mockingbird.api import server
+from mockingbird.core import agent, state
+from mockingbird.media import attachments
+from mockingbird.ui import dashboard
 from google import genai
 from google.genai import errors, types
 from google.oauth2.credentials import Credentials

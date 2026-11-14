@@ -1,6 +1,6 @@
 """SDK-only Foundry compatibility check; all calls hit a local fake stand-in, never Azure.
 
-uv run --with azure-ai-inference --with aiohttp --with openai --with anthropic python tests/foundry_smoke.py
+uv run --with azure-ai-inference --with aiohttp --with openai --with anthropic python tests/smoke/foundry_smoke.py
 The retired azure-ai-inference SDK is covered for existing applications; OpenAI/v1 is preferred for new code.
 """
 import asyncio
@@ -17,12 +17,14 @@ import threading
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mockingbird import agent, server, state, store
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # tests/media_fixtures.py
+from mockingbird.api import server
+from mockingbird.core import agent, state, store
 
 # A user-level hook may already shadow this checkout on PYTHONPATH; exercise the checkout's copy.
 _spec = importlib.util.spec_from_file_location(
-    "mockingbird_hook_repo", Path(__file__).resolve().parents[1] / "mockingbird_hook.py")
+    "mockingbird_hook_repo", Path(__file__).resolve().parents[2] / "mockingbird_hook.py")
 hook = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(hook)
 from anthropic import AnthropicFoundry, AsyncAnthropicFoundry
@@ -200,9 +202,9 @@ def main():
             env = {k: v for k, v in os.environ.items() if not k.startswith("BRIDGE_")}
             env["BRIDGE_CACHE"] = "off"
             result = subprocess.run(
-                [sys.executable, str(Path(__file__).resolve().parents[1] / "bridge.py"), "run",
+                [sys.executable, str(Path(__file__).resolve().parents[2] / "bridge.py"), "run",
                  "--auto", shlex.join([sys.executable, str(fake)]), "--", sys.executable, __file__, "--runner-client"],
-                cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, text=True, timeout=60)
+                cwd=Path(__file__).resolve().parents[2], env=env, capture_output=True, text=True, timeout=60)
             if result.returncode:
                 sys.stderr.write(result.stderr)
                 return result.returncode
