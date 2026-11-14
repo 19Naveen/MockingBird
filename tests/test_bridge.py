@@ -10,7 +10,8 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
-import urllib.request
+import urllib.request, urllib.error
+import shlex
 
 import bridge
 import mockingbird_hook as hook
@@ -22,7 +23,7 @@ class BridgeTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         settings = dict(DIR=self.root, CACHE=self.root / "cache", AUTO="fake", REAL=False,
-                        REDACT=False, QUIET=True, JOURNAL=None)
+                        REDACT=False, REPLAY=False, NAMESPACE="", FAULTS=[], QUIET=True, JOURNAL=None)
         self.settings = patch.multiple(bridge, **settings)
         self.settings.start()
         self.addCleanup(self.settings.stop)
@@ -89,7 +90,7 @@ class BridgeTests(unittest.TestCase):
 
     def test_redact_bypasses_existing_cache_and_writes_nothing(self):
         bridge.CACHE.mkdir()
-        bridge._write(bridge.cache_file(self.req), {"text": "old private answer"})
+        bridge._write(bridge.cache_file(self.req, "anthropic"), {"text": "old private answer"})
         before = list(bridge.CACHE.iterdir())
         with patch.object(bridge, "REDACT", True), patch.object(bridge, "run_auto", return_value={"text": "new"}) as auto:
             self.assertIsNone(bridge.cache_file(self.req))
@@ -161,10 +162,15 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(req.url.host, "127.0.0.1")
 
     def test_child_cli_cannot_inherit_hook_opt_in(self):
-        with patch.dict(os.environ, MOCKINGBIRD_ENABLED="1", OPENAI_BASE_URL="http://127.0.0.1:8787/v1"):
+        with patch.dict(os.environ, MOCKINGBIRD_ENABLED="1", OPENAI_BASE_URL="http://127.0.0.1:8787/v1"), patch.object(
+                bridge, "BRIDGE_PORTS", {8787}):
             child = bridge._child_env()
         self.assertNotIn("MOCKINGBIRD_ENABLED", child)
         self.assertNotIn("OPENAI_BASE_URL", child)
+
+    def test_child_cli_preserves_unrelated_local_provider_proxy(self):
+        with patch.dict(os.environ, ANTHROPIC_BASE_URL="http://localhost:20128"), patch.object(bridge, "BRIDGE_PORTS", {8787}):
+            self.assertEqual(bridge._child_env()["ANTHROPIC_BASE_URL"], "http://localhost:20128")
 
     def test_global_hook_upgrade_is_guarded_idempotent_and_reversible(self):
         rc = self.root / ".bashrc"
@@ -208,6 +214,170 @@ class BridgeTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(Path(bridge.__file__)), "selftest"], env=env,
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_cache_isolates_backend_effort_api_and_namespace(self):
+        key = bridge.request_key(self.req, "anthropic")
+        self.assertEqual(key, bridge.request_key({**self.req, "stream": True}, "anthropic"))
+        self.assertNotEqual(key, bridge.request_key(self.req, "openai"))
+        for command in (bridge.auto_cmd("codex"), bridge.auto_cmd("sonnet[low]"), bridge.auto_cmd("sonnet[high]")):
+            with patch.object(bridge, "AUTO", command):
+                self.assertNotEqual(key, bridge.request_key(self.req, "anthropic"))
+        with patch.object(bridge, "NAMESPACE", "fixture-v1"):
+            self.assertNotEqual(key, bridge.request_key(self.req, "anthropic"))
+            with patch.object(bridge, "AUTO", bridge.auto_cmd("sonnet[low]")):
+                low = bridge.request_key(self.req, "anthropic")
+            with patch.object(bridge, "AUTO", bridge.auto_cmd("sonnet[high]")):
+                self.assertNotEqual(low, bridge.request_key(self.req, "anthropic"))
+
+    def test_offline_replay_hit_and_miss_never_generate(self):
+        with patch.object(bridge, "run_auto", return_value={"text": "saved"}):
+            bridge.get_answer("anthropic", "/v1/messages", self.req, "record")
+        bridge.REPLAY = True
+        with patch.object(bridge, "run_auto", side_effect=AssertionError("must be offline")), patch.object(
+                bridge, "wait_for_agent", side_effect=AssertionError("must be offline")):
+            self.assertEqual(bridge.get_answer("anthropic", "/v1/messages", self.req, "hit"), ({"text": "saved"}, "CACHE"))
+            miss, _ = bridge.get_answer("anthropic", "/v1/messages", {**self.req, "max_tokens": 9}, "miss")
+        self.assertEqual(miss["status"], 409)
+
+    def test_offline_real_replays_and_never_forwards_a_miss(self):
+        bridge.REAL = True
+        url = self.server()
+        with patch.object(bridge, "forward", return_value=(200, "application/json", b'{"text":"saved"}')):
+            self.post(url, self.req)
+        # Wait for the cache writer before changing modes (the response is sent first).
+        with bridge.cache_lock(bridge.live_key(self.req, "https://api.anthropic.com", "/v1/messages")):
+            bridge.REPLAY = True
+        with patch.object(bridge, "forward", side_effect=AssertionError("must be offline")):
+            self.assertEqual(self.post(url, self.req), {"text": "saved"})
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.post(url, {**self.req, "max_tokens": 9})
+        self.assertEqual(error.exception.code, 409)
+        error.exception.close()
+
+    def test_real_cache_isolates_azure_deployment_and_api_version(self):
+        a = bridge.live_key(self.req, "https://example.openai.azure.com", "/openai/deployments/a/chat/completions?api-version=1")
+        for path in ("/openai/deployments/b/chat/completions?api-version=1", "/openai/deployments/a/chat/completions?api-version=2"):
+            self.assertNotEqual(a, bridge.live_key(self.req, "https://example.openai.azure.com", path))
+
+    def test_replay_rejects_disabled_cache_and_redaction(self):
+        for settings in ({"CACHE": None}, {"REDACT": True}):
+            with self.subTest(settings=settings), patch.multiple(bridge, **settings), self.assertRaises(SystemExit):
+                bridge.configure(["--replay"])
+
+    def test_scripted_errors_malformed_body_delay_and_exhaustion(self):
+        bridge.FAULTS = [{"status": 429, "error": "rate limited"}, {"body": "not-json"}, {"delay": 0.03}]
+        url = self.server()
+        with patch.object(bridge, "run_auto", return_value={"text": "normal"}) as auto:
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.post(url, self.req)
+            self.assertEqual(error.exception.code, 429)
+            self.assertIn(b"rate limited", error.exception.read())
+            error.exception.close()
+            with self.assertRaises(ValueError):
+                self.post(url, self.req)
+            start = time.monotonic()
+            self.assertEqual(self.post(url, self.req)["content"][0]["text"], "normal")
+            self.assertGreaterEqual(time.monotonic() - start, 0.03)
+            self.post(url, self.req)  # normal replay after fault steps run out
+        self.assertEqual(auto.call_count, 1)
+
+    def test_fault_file_validation(self):
+        path = self.root / "faults.json"
+        for bad in ({}, [1], [{"delay": -1}], [{"delay": float("nan")}], [{"status": 100}],
+                    [{"body": {}}], [{"body": "x", "error": "y"}], [{"unknown": 1}]):
+            path.write_text(json.dumps(bad))
+            with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                bridge.configure(["--faults", str(path)])
+        path.write_text('[{"delay": 0.1}, {"status": 503}, {"body": "invalid JSON"}]')
+        bridge.configure(["--faults", str(path)])
+        self.assertEqual(len(bridge.FAULTS), 3)
+
+    def runner(self, code, *options):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("BRIDGE_") and k != "MOCKINGBIRD_ENABLED"}
+        env.update(BRIDGE_CACHE=str(self.root / "cache"), XDG_STATE_HOME=str(self.root / "state"))
+        return subprocess.run([sys.executable, str(Path(bridge.__file__)), "run", *options, "--",
+                               sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=30)
+
+    def test_runner_scopes_routing_preserves_exit_and_stops_bridge(self):
+        code = ('import os,json,sys; print(json.dumps({k:os.environ[k] for k in '
+                '["OPENAI_BASE_URL","MOCKINGBIRD_STATE","PYTHONPATH","OPENAI_API_KEY"]})); sys.exit(7)')
+        state_before = bridge.STATE.read_bytes() if bridge.STATE.exists() else None
+        result = self.runner(code, "--agent")
+        self.assertEqual(result.returncode, 7, result.stderr)
+        env = json.loads(result.stdout)
+        self.assertEqual(env["OPENAI_API_KEY"], "bridge-dummy")
+        self.assertFalse(Path(env["MOCKINGBIRD_STATE"]).exists())
+        self.assertFalse(Path(env["PYTHONPATH"].split(os.pathsep)[0]).exists())
+        with self.assertRaises(OSError):
+            urllib.request.urlopen(env["OPENAI_BASE_URL"].removesuffix("/v1") + "/health", timeout=1)
+        self.assertEqual(bridge.STATE.read_bytes() if bridge.STATE.exists() else None, state_before)
+
+    def test_runner_hook_redirects_hardcoded_provider_urls(self):
+        (self.root / "httpx.py").write_text('''
+class Client:
+    def send(self, request, **kw):
+        return request.url.host
+class AsyncClient:
+    async def send(self, request, **kw):
+        return request.url.host
+''')
+        code = f'''
+import sys, asyncio
+sys.path.insert(0, {str(self.root)!r})
+import httpx
+class URL:
+    host, scheme, port = "api.openai.com", "https", None
+    def copy_with(self, **kw):
+        return type("URL", (), kw)()
+class Request:
+    url, headers = URL(), {{}}
+assert httpx.Client().send(Request()) == "127.0.0.1"
+assert asyncio.run(httpx.AsyncClient().send(Request())) == "127.0.0.1"
+'''
+        result = self.runner(code, "--agent")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_runner_command_and_missing_command(self):
+        result = self.runner('import sys; print("command ran")', "--agent")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("command ran", result.stdout)
+        with self.assertRaises(SystemExit):
+            bridge.run_command(["--"])
+
+    def test_runner_passes_command_help_without_intercepting_it(self):
+        result = subprocess.run([sys.executable, str(Path(bridge.__file__)), "run", "--agent", "--", sys.executable, "--help"],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PYTHONPATH", result.stdout)
+
+    def test_scripted_delay_can_trigger_a_client_timeout(self):
+        import socket
+        bridge.FAULTS = [{"delay": 0.1, "status": 503}]
+        url = self.server()
+        request = urllib.request.Request(url + "/v1/messages", json.dumps(self.req).encode())
+        with self.assertRaises(socket.timeout):
+            urllib.request.urlopen(request, timeout=0.02)
+
+    def test_runner_cleans_up_after_interrupt(self):
+        import signal
+        env = {k: v for k, v in os.environ.items() if not k.startswith("BRIDGE_")}
+        env["XDG_STATE_HOME"] = str(self.root / "state")
+        ready = self.root / "ready"
+        code = f'import os,time; from pathlib import Path; Path({str(ready)!r}).write_text(os.environ["MOCKINGBIRD_STATE"]); time.sleep(60)'
+        process = subprocess.Popen([sys.executable, str(Path(bridge.__file__)), "run", "--agent", "--", sys.executable, "-c", code],
+                                   env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline = time.monotonic() + 10
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(ready.exists())
+            process.send_signal(signal.SIGINT)
+            self.assertEqual(process.wait(timeout=10), 130)
+            self.assertFalse(Path(ready.read_text()).exists())
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
 
 
 if __name__ == "__main__":

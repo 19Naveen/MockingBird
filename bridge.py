@@ -5,12 +5,16 @@
         [--auto CMD]    Shows a live dashboard in a terminal; --plain (or no terminal) logs lines to stderr instead.
         [--plain]       --model sonnet[high] answers each request with a lean `claude -p` call (gpt*/o*: `codex exec`).
         [--redact]      Disable disk caching and hide model, project and error details in history and logs.
+        [--replay]      Offline: replay saved answers, return 409 on a cache miss, never call a model or upstream.
+        [--faults FILE] Apply a JSON list of errors, raw bodies and delays, one step per incoming API request.
         [--real]        --real: no stand-in model. A call seen before is replayed; anything new goes to the real
                         API with the app's own key (Anthropic, OpenAI, Azure) and its answer is saved.
         [--agent]       Default: sonnet[medium] when the claude CLI exists. --auto CMD runs any command instead
                         (prompt on stdin, JSON on stdout). --agent: a coding agent serves requests via next/answer.
                         Every call is logged (metadata only) to ~/.local/state/mockingbird/calls.db.
   stats                 print the analytics (all calls ever, across projects)
+  run [serve options] -- COMMAND ...
+                        start an isolated bridge, route only COMMAND to it, then clean up; returns its exit code.
   update                install the newest release from GitHub (your history and saved answers stay)
   uninstall [--purge]   remove mockingbird; --purge also deletes the history and saved answers
   cache [--purge]       list the saved answers, or delete them all (asks first; --yes skips the question).
@@ -42,7 +46,7 @@ PROJECT = Path.cwd().name  # the folder the server runs in, shown per call
 QUIET = False  # True while the dashboard owns the terminal
 
 VERSION = "1.14.0"
-STATE = Path.home() / ".mockingbird" / "active.json"  # exists only while `serve` runs; the hook reads it
+STATE = Path(os.environ.get("BRIDGE_STATE", str(Path.home() / ".mockingbird" / "active.json")))
 CLAUDE_CMD = ('claude -p --model {m} --effort {e} --tools "" --system-prompt "You stand in for an LLM API. '
               'Follow the instructions in the user message exactly." --strict-mcp-config --disable-slash-commands '
               '--no-session-persistence')
@@ -54,6 +58,7 @@ OPENCODE_CMD = ('opencode run --archived{model} -f {{prompt_file}} '
                 '"Follow the instructions in the attached file exactly. Reply with only the JSON object it asks for."')
 DIR = Path(os.environ.get("BRIDGE_DIR", ".llm-bridge")).resolve()
 PORT = int(os.environ.get("BRIDGE_PORT", "8787"))
+BRIDGE_PORTS = set()
 TIMEOUT = float(os.environ.get("BRIDGE_TIMEOUT", "900"))
 AUTO = os.environ.get("BRIDGE_AUTO", "")
 REAL = os.environ.get("BRIDGE_REAL") == "1"  # serve --real: misses go to the real API with the app's own keys
@@ -61,6 +66,10 @@ SLOTS = threading.BoundedSemaphore(int(os.environ.get("BRIDGE_PARALLEL", "4")))
 _cache = os.environ.get("BRIDGE_CACHE", str(dashboard.CACHE_DIR))  # one cache for every project; "off" disables
 CACHE = None if _cache.lower() == "off" else Path(_cache).resolve()
 REDACT = os.environ.get("BRIDGE_REDACT") == "1"
+REPLAY = os.environ.get("BRIDGE_REPLAY") == "1"
+NAMESPACE = os.environ.get("BRIDGE_NAMESPACE", "")
+FAULTS = []
+FAULT_LOCK = threading.Lock()
 # shortcut: fixed lock stripes may serialize unrelated keys; use per-key locks if throughput needs it.
 CACHE_LOCKS = [threading.Lock() for _ in range(64)]
 REDIRECT_VARS = ("ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "AZURE_OPENAI_ENDPOINT",
@@ -169,7 +178,10 @@ class Shim(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # a timeout test may deliberately abandon a delayed response
 
     def _error(self, api, status, msg):
         body = ({"type": "error", "error": {"type": "api_error", "message": msg}} if api == "anthropic"
@@ -194,7 +206,7 @@ class Shim(BaseHTTPRequestHandler):
             self._error(api, 400, "bridge: --real only forwards to api.anthropic.com, api.openai.com or "
                                   "*.openai.azure.com, or to BRIDGE_UPSTREAM_ANTHROPIC / BRIDGE_UPSTREAM_OPENAI")
             return self._record(rid, model, api, "ERROR", t0, "upstream not allowed", 400)
-        self.key = live_key(req, base)
+        self.key = live_key(req, base, self.path)
         with cache_lock(self.key):
             return self._real_cached(api, raw, req, rid, model, t0, base)
 
@@ -205,6 +217,9 @@ class Shim(BaseHTTPRequestHandler):
             self._send(http["status"], http["body"].encode(), http["content_type"])
             log(f"{rid} replayed from cache (real API answer)")
             return self._record(rid, model, api, "CACHE", t0, http_label(http["content_type"], http["body"]))
+        if REPLAY:
+            self._error(api, 409, "bridge: offline replay cache miss")
+            return self._record(rid, model, api, "ERROR", t0, "offline replay cache miss", 409)
         status, ctype, body = forward(base, self.path, raw, self.headers)
         self._send(status, body, ctype)
         text = body.decode("utf-8", "replace")
@@ -244,10 +259,21 @@ class Shim(BaseHTTPRequestHandler):
             return self._record(None, "(no model)", api, "ERROR", t0, "request body is not JSON", 400)
         rid = f"{time.time_ns()}-{uuid.uuid4().hex[:6]}"  # sortable, so `next` serves oldest first
         model = str(req.get("model", "(no model)"))
-        self.key = request_key(req)
+        self.key = request_key(req, api)
         if JOURNAL:
             JOURNAL.start(rid, "[redacted]" if REDACT else model, api)
         log(f"{rid} received ({api}, model={model}, stream={bool(req.get('stream'))})")
+        with FAULT_LOCK:
+            fault = FAULTS.pop(0) if FAULTS else {}
+        if fault.get("delay"):
+            time.sleep(fault["delay"])
+        if "body" in fault:
+            self._send(fault.get("status", 200), fault["body"])
+            return self._record(rid, model, api, "ERROR", t0, "scripted raw response", fault.get("status", 200))
+        if "status" in fault or "error" in fault:
+            status = fault.get("status", 500)
+            self._error(api, status, fault.get("error", "scripted failure"))
+            return self._record(rid, model, api, "ERROR", t0, "scripted failure", status)
         if REAL:
             return self._real(api, raw, req, rid, model, t0)
         ans, source = get_answer(api, path, req, rid)
@@ -274,8 +300,9 @@ class Shim(BaseHTTPRequestHandler):
         pass
 
 
-def request_key(req):
-    return hashlib.sha256(_req_key(req).encode()).hexdigest()
+def request_key(req, api=""):
+    identity = json.dumps([api, AUTO or "agent", NAMESPACE, _req_key(req)])
+    return hashlib.sha256(identity.encode()).hexdigest()
 
 
 # ---------- --real: the real API behind the cache ----------
@@ -300,9 +327,9 @@ def upstream_for(api, headers):
     return UPSTREAM_DEFAULT[api]
 
 
-def live_key(req, base):
+def live_key(req, base, path=""):
     # Real answers never share keys with stand-in answers, and streamed and plain replies are stored apart.
-    salt = f"|live|{base}|stream={bool(req.get('stream'))}"
+    salt = f"|live|{base}|{path}|{NAMESPACE}|stream={bool(req.get('stream'))}"
     return hashlib.sha256((_req_key(req) + salt).encode()).hexdigest()
 
 
@@ -336,10 +363,10 @@ def http_label(ctype, body):
     return "tool_use " + ", ".join(calls) if calls else f"text · {len(text):,} chars"
 
 
-def cache_file(req):
+def cache_file(req, api=""):
     if not CACHE or REDACT:
         return None
-    return CACHE / (request_key(req) + ".json")
+    return CACHE / (request_key(req, api) + ".json")
 
 
 def _block_text(block):
@@ -365,22 +392,25 @@ def asked_text(req):
 
 def get_answer(api, path, req, rid):
     """Returns (answer or None, source): CACHE, FRESH (auto CLI) or AGENT (subagent)."""
-    with cache_lock(request_key(req)):
+    with cache_lock(request_key(req, api)):
         return _get_answer(api, path, req, rid)
 
 
 def _get_answer(api, path, req, rid):
-    cf = cache_file(req)
+    cf = cache_file(req, api)
     if cf and cf.exists():
         log(f"{rid} replayed from cache")
         data = json.loads(cf.read_text())
         return dashboard.cached_answer(data), "CACHE"
+    if REPLAY:
+        return {"error": "offline replay cache miss", "status": 409}, "CACHE"
     ans = run_auto(api, req, rid) if AUTO else wait_for_agent(api, path, req, rid)
     if cf and ans is not None and "error" not in ans:  # never cache failures
         cf.parent.mkdir(parents=True, exist_ok=True)
         (cf.parent / ".gitignore").write_text("*\n")  # answers may echo test data: opt in to committing them
         _write(cf, {"meta": {"saved": time.time(), "model": str(req.get("model", "")), "api": api,
-                             "project": PROJECT, "asked": asked_text(req), "label": describe(ans)},
+                             "project": PROJECT, "asked": asked_text(req), "label": describe(ans),
+                             "backend": AUTO or "agent", "namespace": NAMESPACE},
                     "answer": ans})
     return ans, "FRESH" if AUTO else "AGENT"
 
@@ -417,9 +447,16 @@ def wait_for_agent(api, path, req, rid):
 
 def _child_env():
     # The test shell points these at the bridge; a child CLI inheriting them would call itself forever.
+    from urllib.parse import urlsplit
+    def redirected(value):
+        try:
+            url = urlsplit(value)
+            return url.hostname in ("127.0.0.1", "localhost", "::1") and url.port in BRIDGE_PORTS
+        except ValueError:
+            return False
     return {k: v for k, v in os.environ.items()
             if k != "MOCKINGBIRD_ENABLED" and
-            not (k in REDIRECT_VARS and ("127.0.0.1" in v or "localhost" in v or v == "bridge-dummy"))}
+            not (k in REDIRECT_VARS and (redirected(v) or v == "bridge-dummy"))}
 
 
 def run_auto(api, req, rid):
@@ -454,9 +491,12 @@ def run_auto(api, req, rid):
 
 
 def serve(port=PORT):
+    if REPLAY and (not CACHE or REDACT):
+        raise ValueError("offline replay requires an enabled cache and cannot use --redact")
     _dirs()
     srv = ThreadingHTTPServer(("127.0.0.1", port), Shim)  # loopback only
-    mode = "real API (repeats replayed)" if REAL else f"auto: {AUTO}" if AUTO else "agent serves via next/answer"
+    BRIDGE_PORTS.add(srv.server_port)
+    mode = "offline replay" if REPLAY else "real API (repeats replayed)" if REAL else f"auto: {AUTO}" if AUTO else "agent serves via next/answer"
     log(f"v{VERSION} listening on http://127.0.0.1:{srv.server_port}  mode={mode}  cache={CACHE or 'off'}")
     return srv
 
@@ -551,6 +591,120 @@ def answer(rid, text):
 # ---------- convenience ----------
 
 REPO = "19Naveen/MockingBird"
+
+
+def configure(args):
+    """Shared options for serve and the bridge subprocess started by run."""
+    global AUTO, REAL, REPLAY, REDACT, CACHE, FAULTS
+    import argparse, math
+    parser = argparse.ArgumentParser(prog="mockingbird serve")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--model")
+    mode.add_argument("--auto")
+    mode.add_argument("--agent", action="store_true")
+    mode.add_argument("--real", action="store_true")
+    parser.add_argument("--plain", action="store_true")
+    parser.add_argument("--redact", action="store_true")
+    parser.add_argument("--replay", action="store_true")
+    parser.add_argument("--faults")
+    opts = parser.parse_args(args)
+    REAL, REPLAY, REDACT = REAL or opts.real, REPLAY or opts.replay, REDACT or opts.redact
+    if REPLAY and (not CACHE or REDACT):
+        parser.error("--replay requires an enabled cache and cannot use --redact")
+    if REDACT:
+        CACHE = None
+    if opts.faults:
+        try:
+            FAULTS = json.loads(Path(opts.faults).read_text())
+            if not isinstance(FAULTS, list):
+                raise ValueError("expected a JSON list")
+            for step in FAULTS:
+                if not isinstance(step, dict) or set(step) - {"delay", "status", "error", "body"}:
+                    raise ValueError("steps accept only delay, status, error and body")
+                delay = step.get("delay", 0)
+                if type(delay) not in (float, int) or not math.isfinite(delay) or not 0 <= delay <= TIMEOUT:
+                    raise ValueError(f"delay must be between 0 and {TIMEOUT} seconds")
+                status = step.get("status", 200 if "body" in step else 500)
+                if type(status) is not int or not (200 if "body" in step else 400) <= status <= 599:
+                    raise ValueError("invalid HTTP status")
+                if ("error" in step and not isinstance(step["error"], str)) or (
+                        "body" in step and (not isinstance(step["body"], str) or "error" in step)):
+                    raise ValueError("body/error must be strings and cannot be combined")
+        except (OSError, ValueError) as e:
+            parser.error(f"invalid faults file: {e}")
+    spec = opts.model
+    if REAL:
+        spec, AUTO = None, ""
+    elif opts.agent:
+        AUTO = ""
+    elif opts.auto:
+        AUTO = opts.auto
+    elif not spec and not AUTO:
+        spec = default_spec()
+        if not spec:
+            log("no CLI found: agent mode (or pass --model to select an offline replay namespace)")
+    if spec:
+        AUTO = auto_cmd(spec)
+    return spec, opts.plain
+
+
+def run_command(args):
+    """Own two process groups: a private bridge and the command under test. Never touch global hook state."""
+    import tempfile
+    if "--" not in args:
+        sys.exit("usage: mockingbird run [serve options] -- COMMAND ...")
+    split = args.index("--")
+    options, command = args[:split], args[split + 1:]
+    if not command:
+        sys.exit("run needs a command after --")
+    configure(options)  # reject invalid options before starting anything
+    processes = []
+    with tempfile.TemporaryDirectory(prefix="mockingbird-run-") as folder:
+        root = Path(folder)
+        state = root / "active.json"
+        (root / "sitecustomize.py").write_text(SITECUSTOMIZE)
+        (root / "mockingbird_hook.py").write_text(Path(__file__).with_name("mockingbird_hook.py").read_text())
+        server_env = {**_child_env(), "BRIDGE_PORT": "0", "BRIDGE_DIR": str(root / "queue"), "BRIDGE_STATE": str(state)}
+        try:
+            server = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "serve", "--plain", *options],
+                                      env=server_env, start_new_session=True)
+            processes.append(server)
+            deadline = time.monotonic() + 10
+            while not state.exists():
+                if server.poll() is not None:
+                    return server.returncode or 1
+                if time.monotonic() > deadline:
+                    sys.exit("private bridge did not start within 10 seconds")
+                time.sleep(0.05)
+            port = json.loads(state.read_text())["port"]
+            env = {**os.environ, "MOCKINGBIRD_ENABLED": "1", "MOCKINGBIRD_STATE": str(state),
+                   "PYTHONPATH": str(root) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+                   "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}",
+                   "OPENAI_BASE_URL": f"http://127.0.0.1:{port}/v1", "AZURE_OPENAI_ENDPOINT": f"http://127.0.0.1:{port}"}
+            if not REAL:
+                env.update({key: "bridge-dummy" for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AZURE_OPENAI_API_KEY")})
+            child = subprocess.Popen(command, env=env, start_new_session=True)
+            processes.append(child)
+            try:
+                code = child.wait()
+                return code if code >= 0 else 128 - code
+            except KeyboardInterrupt:
+                os.killpg(child.pid, signal.SIGINT)
+                return 130
+        except OSError as e:
+            log(f"could not start command: {e}")
+            return 127
+        finally:
+            for process in reversed(processes):
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
 
 
 def _version(text):
@@ -783,9 +937,9 @@ def selftest():
     hi = {"model": "claude-x", "messages": [{"role": "user", "content": "hi"}]}
     s, b = post("/v1/messages", hi)
     assert s == 200 and json.loads(b)["content"][0]["text"] == "auto:False", (s, b)  # loop guard held
-    AUTO = f"{sys.executable} -c 'raise SystemExit(3)'"  # cache must answer without running the command
     s, b = post("/v1/messages", {**hi, "stream": True})
     assert s == 200 and "auto:False" in b and "message_stop" in b, (s, b)
+    AUTO = f"{sys.executable} -c 'raise SystemExit(3)'"
     s, b = post("/v1/messages", {**hi, "max_tokens": 5})  # cache miss -> failing command -> API error, not cached
     assert s == 502 and "exited 3" in b and len(list(CACHE.glob("*.json"))) == 1, (s, b)
 
@@ -978,27 +1132,13 @@ def selftest():
 
 if __name__ == "__main__":
     cmd, args = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else ("", [])
-    if cmd in ("", "help", "-h", "--help") or "-h" in args or "--help" in args:
+    if cmd in ("", "help", "-h", "--help"):
         print(__doc__)
         sys.exit(0)
     if cmd == "serve":
-        REDACT = REDACT or "--redact" in args
-        if REDACT:
-            CACHE = None
-        if "--auto" in args:
-            AUTO = args[args.index("--auto") + 1]
-        REAL = REAL or "--real" in args
-        spec = args[args.index("--model") + 1] if "--model" in args else None
-        if REAL:
-            spec, AUTO = None, ""  # no stand-in model: misses go to the real API
-        elif not spec and not AUTO and "--agent" not in args:
-            spec = default_spec()
-            if not spec:
-                log("no claude, codex or opencode CLI found: agent mode (an agent answers via next/answer)")
-        if spec:
-            AUTO = auto_cmd(spec)
+        spec, plain = configure(args)
         # Dashboard in a real terminal; plain log lines when asked, or when an agent runs us in the background.
-        live = "--plain" not in args and sys.stdout.isatty() and sys.stdin.isatty()
+        live = not plain and sys.stdout.isatty() and sys.stdin.isatty()
         JOURNAL = dashboard.Journal()
         srv = serve()
         STATE.parent.mkdir(exist_ok=True)
@@ -1011,7 +1151,7 @@ if __name__ == "__main__":
                 hooked = (os.environ.get("MOCKINGBIRD_ENABLED") == "1" and
                           str(HOOK_DIR) in os.environ.get("PYTHONPATH", "").split(os.pathsep))
                 dashboard.run(JOURNAL, cache_dir=CACHE, meta={
-                    "mode": ("real API, repeats replayed" if REAL else f"{spec_label(spec)} answers" if spec
+                    "mode": ("offline replay" if REPLAY else "real API, repeats replayed" if REAL else f"{spec_label(spec)} answers" if spec
                              else "custom auto command" if AUTO else "agent mode (subagents answer)"),
                     "address": f"http://127.0.0.1:{srv.server_port}",
                     "cache": str(CACHE) if CACHE else "",
@@ -1027,6 +1167,8 @@ if __name__ == "__main__":
             STATE.unlink(missing_ok=True)  # hooked apps go back to the real API
             QUIET = False
             log("stopped: hooked apps now use the real API")
+    elif cmd == "run":
+        sys.exit(run_command(args))
     elif cmd == "hook" and len(args) in (1, 2) and args[0] in ("install", "uninstall", "status"):
         hook(*args)
     elif cmd == "cache" and not CACHE:

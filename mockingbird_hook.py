@@ -9,7 +9,7 @@ import json
 import os
 import sys
 
-STATE = os.path.join(os.path.expanduser("~"), ".mockingbird", "active.json")
+STATE = os.environ.get("MOCKINGBIRD_STATE", os.path.join(os.path.expanduser("~"), ".mockingbird", "active.json"))
 HOSTS = ("api.anthropic.com", "api.openai.com")
 MODULES = ("httpx", "httpx2")  # older SDKs use httpx; anthropic>=2 and openai>=3 use httpx2 (same API)
 _announced = False
