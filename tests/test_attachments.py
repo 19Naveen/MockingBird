@@ -98,7 +98,13 @@ class AttachmentTests(unittest.TestCase):
                     payload = json.loads(kwargs["input"])
                     self.assertEqual(payload["message"]["content"][1]["source"]["data"], encoded(red_png()))
                     self.assertIn("--input-format", argv)
-                    stdout = json.dumps({"result": '{"text":"red"}'})
+                    self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
+                    self.assertIn("--verbose", argv)
+                    stdout = "\n".join([
+                        json.dumps({"type": "system", "subtype": "init"}),
+                        json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "red"}]}}),
+                        json.dumps({"type": "result", "subtype": "success", "result": '{"text":"red"}'}),
+                    ]) + "\n"
                 else:
                     flag = "--image" if model == "codex" else "--file"
                     paths.append(Path(argv[argv.index(flag) + 1]))
@@ -109,6 +115,15 @@ class AttachmentTests(unittest.TestCase):
                     agent.subprocess, "run", side_effect=cli):
                 self.assertEqual(agent.run_auto("anthropic", self.request(self.image), "test"), {"text": "red"})
             self.assertTrue(all(not p.exists() for p in paths))
+
+    def test_claude_stream_result_uses_final_result_event(self):
+        lines = [
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "not the answer"}]}},
+            {"type": "result", "subtype": "success", "result": '{"text":"red"}'},
+        ]
+        self.assertEqual(agent.claude_result("\n".join(map(json.dumps, lines))), '{"text":"red"}')
+        with self.assertRaises(ValueError):
+            agent.claude_result('{"type":"assistant","message":{}}')
 
     def test_temp_media_is_deleted_on_cli_timeout(self):
         paths = []

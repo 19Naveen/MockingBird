@@ -1,6 +1,7 @@
 # Unreleased
 
 - Moved the implementation into a standard `src/` layout with `pyproject.toml`, and grouped the package by concern (`core/`, `api/`, `providers/`, `media/`, `ui/`). `bridge.py` remains the installed entry point, `mockingbird_hook.py` stays standalone, and the opt-in provider checks moved to `tests/smoke/`. No command, environment variable or wire-format changes.
+- Claude Code image and PDF input now uses the stream-json output that its stream-json input requires, so multimodal requests work with current Claude Code releases.
 
 # v1.14.0
 

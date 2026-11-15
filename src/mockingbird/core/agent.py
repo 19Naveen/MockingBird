@@ -63,6 +63,21 @@ def _child_env():
             not (k in state.REDIRECT_VARS and (redirected(v) or v == "bridge-dummy"))}
 
 
+def claude_result(stdout):
+    """Pick the final result object from Claude Code's stream-json output (one JSON object per line)."""
+    for line in reversed(stdout.splitlines()):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            result = event.get("result")
+            if not isinstance(result, str):
+                raise ValueError("claude result event has no text")
+            return result
+    raise ValueError("claude output ended without a result event")
+
+
 def run_auto(api, req, rid):
     with state.SLOTS, tempfile.TemporaryDirectory(prefix="media-", dir=state.DIR) as folder:
         try:
@@ -88,7 +103,7 @@ def run_auto(api, req, rid):
                     elif cli == "opencode":
                         argv += [v for p in images for v in ("--file", str(p))]
                     elif cli == "claude":
-                        argv += ["--input-format", "stream-json", "--output-format", "json"]
+                        argv += ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
                         stdin = attachments.claude_input(stdin, images)
                     else:
                         return {"error": "image input supports the built-in claude, codex and opencode commands", "status": 501}
@@ -104,7 +119,7 @@ def run_auto(api, req, rid):
             if out.returncode != 0:
                 return {"error": f"auto command exited {out.returncode}: {out.stderr.strip()[-300:]}", "status": 502}
             try:
-                output = json.loads(out.stdout)["result"] if images and cli == "claude" else out.stdout
+                output = claude_result(out.stdout) if images and cli == "claude" else out.stdout
                 return parse_answer(output)
             except (ValueError, AssertionError, KeyError, TypeError) as e:
                 last = str(e)
