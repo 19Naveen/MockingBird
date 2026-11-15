@@ -31,7 +31,8 @@ If no test command is given, find the project's AI or integration test command. 
 
 Use **auto mode** unless its CLI is missing or the user asks for agent mode. In auto mode the bridge answers each request by running one lean headless CLI call. It's faster, and you don't have to keep serving requests.
 
-- Plain `serve` picks the first CLI on the machine: `claude` (Sonnet, medium effort), then `codex` (its configured model), then `opencode` (its configured model). With none of them, use agent mode.
+- Plain `serve` uses the coding agent saved at install: the first one installed, `claude` (Sonnet, medium effort), then `codex` (its configured model), then `opencode` (its configured model). `mockingbird agent` shows which one, and `mockingbird agent <name>` changes it. With none of them, use agent mode.
+- In the interactive dashboard, `p` rotates between the real API and installed stand-ins. It is blocked during active calls and offline replay. Real API cache misses can incur charges. The footer shows the configured model where it can be identified, otherwise `(default)`.
 - `serve --model <spec>` chooses explicitly. The spec can be `sonnet[high]`, `opus[max]` or `haiku` for Claude; `codex` or `gpt-5[low]` for Codex; `opencode` or `opencode/<provider>/<model>` for opencode. Codex runs with `--ephemeral --sandbox read-only`. Both Codex and opencode have live SDK checks; see README for the tested versions and scope.
 - For any other CLI, use `serve --auto '<command>'`. The command must read the prompt on stdin and print JSON on stdout.
 
@@ -48,7 +49,7 @@ Inline PNG/JPEG/GIF/WebP image blocks/data URLs, UTF-8 text documents and base64
 1. Start the bridge in the background from the project folder, and keep it running until step 7. The cache defaults to shared user state, not the project. Run in the background, it logs plain lines instead of drawing its dashboard:
    ```bash
    python3 "$BRIDGE" serve --model <model>[<effort>]   # auto mode
-   python3 "$BRIDGE" serve --agent                     # agent mode (plain `serve` defaults to sonnet[medium])
+   python3 "$BRIDGE" serve --agent                     # agent mode (plain `serve` uses the saved coding agent)
    # env: BRIDGE_PORT=8787 BRIDGE_TIMEOUT=900 BRIDGE_PARALLEL=4 BRIDGE_CACHE=<folder>|off (default ~/.local/state/mockingbird/cache)
    ```
 2. Route the app's calls to the bridge. Pick one way:

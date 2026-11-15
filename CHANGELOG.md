@@ -1,5 +1,9 @@
 # Unreleased
 
+- Press `p` in the dashboard to rotate between the real API and installed Claude Code, Codex and opencode stand-ins. Switching waits for active calls to finish and is disabled during offline replay.
+- The mode indicator shows the answering model when it can be determined, and `(default)` when it cannot.
+- The installer now picks the coding agent that answers requests with no `--model`: Claude Code if installed, otherwise Codex, otherwise opencode. It prints which one, and keeps any choice already saved, so updates do not change it. Install never prompts. `mockingbird agent` shows the choice, and `mockingbird agent codex` (or `claude`, `opencode`, `clear`) changes it. `serve` uses the saved agent when it is still installed, and falls back to the first one found; with none installed it stays in agent mode.
+- The dashboard's compact server status moved from the top row to the bottom-right footer. It shows the port and mode without the routine hook notice.
 - Built-in CLI stand-ins now expose available answering-CLI token usage in provider-shaped responses, including streaming where supported. These figures describe the stand-in, not the target production model; replay repeats the recorded usage. Changing the built-in commands to request structured output changes their cache identities, so existing stand-in fixtures must be recorded again.
 - Moved the implementation into a standard `src/` layout with `pyproject.toml`, and grouped the package by concern (`core/`, `api/`, `providers/`, `media/`, `ui/`). `bridge.py` remains the installed entry point, `mockingbird_hook.py` stays standalone, and the opt-in provider checks moved to `tests/smoke/`. No command, environment variable or wire-format changes.
 - Claude Code image and PDF input now uses the stream-json output that its stream-json input requires, so multimodal requests work with current Claude Code releases.

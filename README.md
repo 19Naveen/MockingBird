@@ -107,7 +107,7 @@ The hook does not patch `httpx` or `httpx2` unless the process starts with `MOCK
 | Command | What it does |
 |---|---|
 | `run [serve options] -- COMMAND` | Runs a command against its own temporary bridge, then cleans up |
-| `serve` | Starts the server and dashboard. With no `--model`, the first available CLI answers (Claude Code → Codex → opencode), or agent mode if none is installed |
+| `serve` | Starts the server and dashboard. With no `--model`, the coding agent saved at install answers, or agent mode if none is installed |
 | `serve --real` | Uses the real API with your own keys, and replays any call it has seen before ([below](#real-api-with-repeats-replayed)) |
 | `serve --model opus[max]` | Picks the model and effort, such as `sonnet[high]` or `haiku` |
 | `serve --plain` | Logs plain lines instead of drawing the dashboard (automatic with no terminal) |
@@ -117,6 +117,7 @@ The hook does not patch `httpx` or `httpx2` unless the process starts with `MOCK
 | `serve --agent` | Lets a coding agent's subagents answer instead (see [SKILL.md](SKILL.md)) |
 | `stats` | Prints the analytics for every call so far |
 | `cache` | Lists the saved answers |
+| `agent` | Shows which installed coding agent answers requests with no `--model`. `agent claude`, `agent codex`, or `agent opencode` saves a different one; `agent clear` forgets the choice |
 | `cache --purge` | Deletes every saved answer after asking (`--yes` skips the question). Your history stays |
 | `update` | Installs the newest release. Your history and saved answers stay |
 | `uninstall` | Removes mockingbird after asking. `--purge` also deletes your history and saved answers |
@@ -126,7 +127,7 @@ The hook does not patch `httpx` or `httpx2` unless the process starts with `MOCK
 
 ## Which model answers
 
-mockingbird answers through a CLI you already have configured, using its own login or provider. It needs no separate API key. With no `--model`, it uses the first tool it finds:
+mockingbird answers through a CLI you already have configured, using its own login or provider. It needs no separate API key. With no `--model`, it uses the coding agent saved at install (the first one installed):
 
 | You have | mockingbird runs | Model it uses |
 |---|---|---|
@@ -137,7 +138,7 @@ mockingbird answers through a CLI you already have configured, using its own log
 
 To choose, pass `--model`: `sonnet[high]`, `opus[max]`, `haiku`, `codex`, `gpt-5[low]`, `opencode`, or `opencode/<provider>/<model>`.
 
-The default prefers Claude Code when installed, then Codex, then opencode. Use `--model codex` to choose Codex explicitly. Codex runs with `--ephemeral --sandbox read-only`, using its configured model. These flags avoid session persistence and restrict filesystem writes; they do not make untrusted requests safe. See the [official Codex non-interactive documentation](https://learn.chatgpt.com/docs/non-interactive-mode).
+The installer saves one default: Claude Code if it is installed, otherwise Codex, otherwise opencode. If several are installed, the saved choice is kept through updates. Run `mockingbird agent` to see which one answers, and `mockingbird agent codex` (or `claude` or `opencode`) to change it. Install does not prompt, so it works from `curl | bash`. Use `--model codex` to choose Codex explicitly. Codex runs with `--ephemeral --sandbox read-only`, using its configured model. These flags avoid session persistence and restrict filesystem writes; they do not make untrusted requests safe. See the [official Codex non-interactive documentation](https://learn.chatgpt.com/docs/non-interactive-mode).
 
 The reproducible live checks are in [tests/smoke/sdk_smoke.py](tests/smoke/sdk_smoke.py). They cover both official SDKs, async clients and streams, streamed tool calls, tool-result loops, Azure deployment routes, eight concurrent identical requests, image recognition, text files and rendered PDFs. Each suite runs again in offline replay mode; it fails if any fresh generation is attempted.
 
@@ -256,7 +257,9 @@ Every call ends one of three ways, and the dashboard uses the same word and colo
 
 It has three tabs. Switch with `1` `2` `3` or `l` `a` `c`, the arrow keys, Tab, or a click.
 
-**1 Live** shows what's happening now. It has a chart of calls (replayed stacked under fresh), a row per model with its state (`asking 4s`, `failed`, `idle`), and the last ten calls with what each one asked. Press `w` to switch between the last 60 minutes, 24 hours and 7 days. The top right shows the server's state: `● listening`, or `● asking` while a call is being answered.
+**1 Live** shows what's happening now. It has a chart of calls (replayed stacked under fresh), a row per model with its state (`asking 4s`, `failed`, `idle`), and the last ten calls with what each one asked. Press `w` to switch between the last 60 minutes, 24 hours and 7 days. The bottom right shows the port and mode, or `● asking` while a call is being answered. The top row holds only the tabs.
+
+Press `p` to rotate between the real API and installed Claude Code, Codex and OpenCode stand-ins. The footer shows the selected backend and model when it can be determined, or `(default)` when it cannot. Claude Code uses Sonnet; Codex and OpenCode use their own configured defaults. Switching is blocked while calls are active and disabled in offline replay mode. **Real API mode can make billable calls** on a cache miss; native Bedrock and Gemini routes do not support real forwarding.
 
 **2 Analytics** covers every call so far: the replay rate, time saved, the last 14 days, how fast fresh answers are per model, how often each model is replayed, failed calls, and projects.
 

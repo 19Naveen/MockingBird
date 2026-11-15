@@ -414,9 +414,95 @@ def spec_label(spec):
     return f"{model}[{effort or 'medium'}]"
 
 
+# Coding agents that can answer: (command on PATH, --model spec that selects it, name shown to users).
+# The order is the default when several are installed.
+AGENTS = (("claude", "sonnet", "Claude Code"), ("codex", "codex", "Codex"), ("opencode", "opencode", "opencode"))
+
+
+def mode_label(cli):
+    """Describe the actual configured default only when it can be determined safely."""
+    if cli == "claude":
+        return "Claude Code (Sonnet)"
+    model = None
+    if cli == "opencode":
+        try:
+            result = subprocess.run(["opencode", "api", "get", "/api/model/default"], capture_output=True,
+                                    text=True, timeout=2, env=_child_env())
+            obj = json.loads(result.stdout) if result.returncode == 0 else {}
+            location = obj.get("location", {}).get("directory")
+            data = obj.get("data", {})
+            # Do not report another project's configured default.
+            if location and Path(location).resolve() == Path.cwd().resolve():
+                model = data.get("modelID")
+        except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
+            pass
+    elif cli == "codex":
+        try:
+            root = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+            text = (root / "config.toml").read_text()
+            # Profiles and nested tables can override the root model; avoid reporting a guess.
+            if not re.search(r"(?m)^\s*profile\s*=", text):
+                header = re.search(r"(?m)^\s*\[", text)
+                root_text = text[:header.start()] if header else text
+                match = re.search(r'''(?m)^\s*model\s*=\s*["']([^"']+)["']\s*(?:#.*)?$''', root_text)
+                model = match.group(1) if match else None
+        except OSError:
+            pass
+    if not isinstance(model, str) or not re.fullmatch(r"[\w./:#-]{1,100}", model):
+        model = "default"
+    return f"{'OpenCode' if cli == 'opencode' else 'Codex'} ({model})"
+
+
+def installed_agents():
+    """[(cli, spec, name)] for the agents installed on this machine, in AGENTS order."""
+    return [(cli, spec, name) for cli, spec, name in AGENTS if shutil.which(cli)]
+
+
+def saved_agent():
+    """The CLI name saved by install or `mockingbird agent <name>`, or None."""
+    try:
+        return state.AGENT_PREF.read_text().strip() or None
+    except OSError:
+        return None
+
+
+def save_agent(cli):
+    """Save the CLI that answers by default; None forgets the choice."""
+    if cli is None:
+        state.AGENT_PREF.unlink(missing_ok=True)
+        return
+    state.AGENT_PREF.parent.mkdir(parents=True, exist_ok=True)
+    state.AGENT_PREF.write_text(cli + "\n")
+
+
+def default_agent():
+    """(cli, spec, name) of the agent that answers when serve has no --model: the saved choice if it is still
+    installed, else the first one installed. None when no agent is installed (agent mode)."""
+    found = installed_agents()
+    if not found:
+        return None
+    saved = saved_agent()
+    for item in found:
+        if item[0] == saved:
+            return item
+    return found[0]
+
+
 def default_spec():
-    """No --model given: use whichever plan this machine has, Claude first, then Codex, then opencode."""
-    for cli, spec in (("claude", "sonnet"), ("codex", "codex"), ("opencode", "opencode")):
-        if shutil.which(cli):
-            return spec
-    return None
+    chosen = default_agent()
+    return chosen[1] if chosen else None
+
+
+def describe_default():
+    """One line for install and `mockingbird agent`: what answers requests with no --model."""
+    chosen = default_agent()
+    if chosen is None:
+        return "No coding agent found (claude, codex or opencode). Requests wait for a subagent (agent mode)."
+    cli, _, name = chosen
+    saved = saved_agent()
+    why = "saved choice" if saved == cli else "first one installed" + (f"; saved {saved} is not installed" if saved else "")
+    line = f"{name} answers requests with no --model ({why})."
+    others = [(c, n) for c, _, n in installed_agents() if c != cli]
+    if others:
+        line += f" Also installed: {', '.join(n for _, n in others)}. Switch with: mockingbird agent {others[0][0]}"
+    return line

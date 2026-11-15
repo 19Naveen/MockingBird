@@ -67,6 +67,14 @@ python3 "$DEST/bridge.py" version </dev/null \
   || fail "Could not start mockingbird. Python 3.9 or newer is required."
 done_ "Startup check passed (the test suite runs in CI)"
 
+# The coding agent that answers requests with no --model: the first one installed (Claude Code, Codex, opencode),
+# unless a choice is already saved. Never prompts: nothing here may wait on a key.
+agent_line=$(python3 "$DEST/bridge.py" agent --default </dev/null) || fail "Could not set the coding agent."
+case "$agent_line" in
+  "No coding agent"*) note "$agent_line" ;;
+  *) done_ "$agent_line" ;;
+esac
+
 if [ "${MOCKINGBIRD_INSTALL_HOOK:-}" = 1 ] && [ -z "${MOCKINGBIRD_NO_HOOK:-}" ]; then
   python3 "$DEST/bridge.py" hook install </dev/null >/dev/null
   shells=""

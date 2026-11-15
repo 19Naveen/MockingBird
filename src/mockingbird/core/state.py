@@ -52,3 +52,7 @@ REPLAY = os.environ.get("BRIDGE_REPLAY") == "1"
 NAMESPACE = os.environ.get("BRIDGE_NAMESPACE", "")
 FAULTS = []
 FAULT_LOCK = threading.Lock()
+MODE_LOCK = threading.Lock()
+ACTIVE_REQUESTS = 0
+# The coding agent (claude, codex or opencode) that answers when serve has no --model. Set by install and `mockingbird agent`.
+AGENT_PREF = dashboard.DEFAULT_DB.parent / "agent"

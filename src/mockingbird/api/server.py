@@ -139,6 +139,15 @@ class Shim(BaseHTTPRequestHandler):
         self._record(rid, model, api, "LIVE", t0, http_label(ctype, text))
 
     def do_POST(self):
+        with state.MODE_LOCK:
+            state.ACTIVE_REQUESTS += 1
+        try:
+            self._handle_post()
+        finally:
+            with state.MODE_LOCK:
+                state.ACTIVE_REQUESTS -= 1
+
+    def _handle_post(self):
         t0 = time.time()
         self.key = ""  # the request's cache key, so the Cache tab can count replays per answer
         path = self.path.split("?")[0].rstrip("/")

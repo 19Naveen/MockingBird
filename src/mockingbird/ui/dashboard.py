@@ -565,8 +565,8 @@ def _title(win, row: int, text: str, note: str, c: dict[str, int]) -> int:
 _CHIPS: list[tuple[int, int]] = []
 
 
-def _header(win, c: dict[str, int], page: int, snap: Snapshot, meta: dict[str, str]) -> None:
-    """Tabs on the left (gotodo's chips); the server's pulse on the right."""
+def _header(win, c: dict[str, int], page: int) -> None:
+    """Tabs only (gotodo's chips). The server's status is in the footer, bottom right."""
     x = 0
     _CHIPS.clear()
     for i, name in enumerate(PAGES):
@@ -574,37 +574,47 @@ def _header(win, c: dict[str, int], page: int, snap: Snapshot, meta: dict[str, s
         x = _put(win, 0, x, f" {i + 1} {name} ", c["chip"] if i == page else c["muted"])
         _CHIPS.append((start, x))
         x += 1
-    width = win.getmaxyx()[1] - MARGIN
+
+
+def _status(c: dict[str, int], snap: Snapshot, meta: dict[str, str]) -> list[tuple[str, int]]:
+    """The server's state: the listening port and mode, or what it is waiting on."""
     port = meta["address"].rsplit(":", 1)[-1]
-    hooked = meta.get("hook", "").startswith("on")
+    mode = meta["mode"]
+    if mode == "real API, repeats replayed":
+        mode = "real API"
+    elif mode == "offline replay":
+        mode = "replay"
     if snap.asking:
         longest = max((r.asking_for for r in snap.rows if r.state == "asking"), default=0.0)
         parts = [("● ", c["fresh"]), (f"asking {snap.asking} {'call' if snap.asking == 1 else 'calls'}, "
                                       f"{longest:.0f}s", c["fresh"] | curses.A_BOLD)]
     else:
-        parts = [("● ", c["ok"]), (f"listening on :{port}", c["text"]), (f"  {meta['mode']}", c["muted"])]
-    if not hooked:
-        parts.append(("  hook off in this terminal", c["fresh"]))
-    x = max(x + 2, width - sum(len(t) for t, _ in parts))
-    for text, attr in parts:
-        x = _put(win, 0, x, text, attr)
+        parts = [("● ", c["ok"]), (f":{port}", c["text"]), (f"  {mode}", c["muted"])]
+    return parts
 
 
-def _footer(win, c: dict[str, int], hints: Sequence[tuple[str, str]], toast: str = "", toast_attr: int = 0) -> None:
-    """Keys only (gotodo's hint bar): accent key, dust verb. A toast confirms an action on the right."""
+def _footer(win, c: dict[str, int], hints: Sequence[tuple[str, str]], toast: str = "", toast_attr: int = 0,
+            status: Sequence[tuple[str, int]] = ()) -> None:
+    """Keys on the left (gotodo's hint bar); the server's status on the right; a toast just left of the status."""
     height, width = win.getmaxyx()
     x = 0
     for key, verb in hints:
         x = _put(win, height - 1, x, key, c["accent"] | curses.A_BOLD)
         x = _put(win, height - 1, x, f" {verb}    ", c["muted"])
+    right = width - MARGIN
     if toast:
-        _put(win, height - 1, max(x + 2, width - MARGIN - len(toast)), toast, toast_attr)
+        _put(win, height - 1, max(x + 2, right - len(toast)), toast, toast_attr)
+        return
+    status_x = max(x + 2, right - sum(len(t) for t, _ in status))
+    xs = status_x
+    for text, attr in status:
+        xs = _put(win, height - 1, xs, text, attr)
 
 
 def draw(win, snap: Snapshot, c: dict[str, int], meta: dict[str, str], page: int = 0, selected: int = 0,
          confirm: bool = False, toast: str = "") -> None:
     win.erase()
-    _header(win, c, page, snap, meta)
+    _header(win, c, page)
     if page == 0:
         _live(win, snap, c, meta)
     elif page == 1:
@@ -612,14 +622,14 @@ def draw(win, snap: Snapshot, c: dict[str, int], meta: dict[str, str], page: int
     else:
         _cache_page(win, snap.entries, c, meta, selected)
     nxt = WINDOWS[(next(i for i, w in enumerate(WINDOWS) if w[0] == snap.window) + 1) % len(WINDOWS)][0]
-    hints = {0: [("1 2 3", "Pages"), ("w", f"Show {nxt}"), ("q", "Quit")],
-             1: [("1 2 3", "Pages"), ("q", "Quit")],
-             2: [("1 2 3", "Pages"), ("↑↓", "Select"), ("x", "Delete"), ("q", "Quit")]}[page]
+    hints = {0: [("1 2 3", "Pages"), ("w", f"Show {nxt}"), ("p", "Mode"), ("q", "Quit")],
+             1: [("1 2 3", "Pages"), ("p", "Mode"), ("q", "Quit")],
+             2: [("1 2 3", "Pages"), ("↑↓", "Select"), ("x", "Delete"), ("p", "Mode"), ("q", "Quit")]}[page]
     if confirm:
         toast, attr = "Press x again to delete this answer. The same call will then be asked fresh.", c["fresh"]
     else:
         attr = c["ok"]
-    _footer(win, c, hints, toast, attr)
+    _footer(win, c, hints, toast, attr, status=_status(c, snap, meta))
     win.noutrefresh()
     curses.doupdate()
 
@@ -631,17 +641,32 @@ _COLS = (("Model", 2, 22), ("State", 24, 12), ("Calls", 36, 6), ("Replayed", 42,
 _TREND_AT = 73
 
 
+def _empty_state(win, c, icon, title, message, hint=""):
+    """Center a compact empty state without drawing over the tabs or footer."""
+    height, width = win.getmaxyx()
+    usable = max(0, width - MARGIN)
+    lines = [(icon, c["accent"]), (title, c["text"] | curses.A_BOLD), (message, c["muted"])]
+    if hint:
+        lines.append((hint, c["accent"]))
+    available = max(0, height - 3)
+    if available < len(lines):
+        lines = lines[1:1 + available]
+    start = max(2, 1 + (available - len(lines)) // 2)
+    for i, (text, attr) in enumerate(lines):
+        text = text[:usable]
+        _put(win, start + i, max(0, (usable - len(text)) // 2), text, attr)
+
+
 def _live(win, snap: Snapshot, c: dict[str, int], meta: dict[str, str]) -> None:
     height, width = win.getmaxyx()
     usable = width - MARGIN
     row = 2
     if not snap.stats.total:
-        _put(win, row, 0, "No calls yet", c["text"] | curses.A_BOLD)
-        _put(win, row + 2, 0, "Run your app or its tests in another terminal. Each call it makes to Anthropic or",
-             c["muted"])
-        _put(win, row + 3, 0, "OpenAI appears here as it happens, and its answer is saved for next time.", c["muted"])
-        _put(win, row + 5, 0, "Not using the hook? Point the SDK here:", c["muted"])
-        _put(win, row + 6, 2, f"ANTHROPIC_BASE_URL={meta['address']}", c["accent"])
+        frames = ("●  ·  ·  ·  ·", "·  ●  ·  ·  ·", "·  ·  ●  ·  ·",
+                  "·  ·  ·  ●  ·", "·  ·  ·  ·  ●")
+        _empty_state(win, c, frames[int(time.monotonic() / 0.8) % len(frames)],
+                     "No calls yet", "Waiting for your first request",
+                     f"ANTHROPIC_BASE_URL={meta['address']}")
         return
 
     replayed = sum(snap.cached_series)
@@ -791,9 +816,8 @@ def _analytics_page(win, a: Analytics, c: dict[str, int]) -> None:
     bar_width = max(16, min(40, usable - 60))
     row = 2
     if not a.total:
-        _put(win, row, 0, "Nothing to analyse yet", c["text"] | curses.A_BOLD)
-        _put(win, row + 2, 0, "Totals, speed and replay rates fill in here as calls come through the Live page.",
-             c["muted"])
+        _empty_state(win, c, "▁  ▃  ▂  ▅  ▃", "Nothing to analyse yet",
+                     "Your insights will appear after your first call")
         return
 
     tiles = [(f"{a.total:,}", "calls", c["accent"]),
@@ -888,16 +912,14 @@ def _cache_page(win, entries: list[CacheEntry], c: dict[str, int], meta: dict[st
         _put(win, row, 0, "The cache is off", c["text"] | curses.A_BOLD)
         _put(win, row + 2, 0, "Every call is asked fresh. Unset BRIDGE_CACHE to save and replay answers.", c["muted"])
         return
+    if not entries:
+        _empty_state(win, c, "[  ↻  ]", "No saved answers yet", "Answers will appear here, ready to replay")
+        return
     home = str(Path.home())
     shown = "~" + folder[len(home):] if folder.startswith(home) else folder
     row = _title(win, row, "Saved answers",
                  f"{len(entries):,} answers, {_size(sum(e.size for e in entries))}, in {shown}", c)
     row += 1
-    if not entries:
-        _put(win, row, 0, "Nothing saved yet. Each fresh answer is saved here, and the same call is replayed",
-             c["muted"])
-        _put(win, row + 1, 0, "from it next time, instantly.", c["muted"])
-        return
 
     answer_w = 30
     asked_w = max(16, usable - 42 - answer_w - 8)
@@ -990,7 +1012,8 @@ PAGE_KEYS = {ord("1"): 0, ord("l"): 0, ord("L"): 0, ord("2"): 1, ord("a"): 1, or
              ord("3"): 2, ord("c"): 2, ord("C"): 2}
 
 
-def run(journal: Journal, meta: dict[str, str], page: int = 0, cache_dir: Path | None = None) -> None:
+def run(journal: Journal, meta: dict[str, str], page: int = 0, cache_dir: Path | None = None,
+        switch_mode=None) -> None:
     """Show the dashboard until the user presses q or Ctrl+C."""
     board = Board(journal, cache_dir)
     board.refresh()
@@ -1017,6 +1040,9 @@ def run(journal: Journal, meta: dict[str, str], page: int = 0, cache_dir: Path |
                 confirm = False
             if key in (ord("q"), ord("Q")):
                 return
+            if key in (ord("p"), ord("P")) and switch_mode:
+                toast, toast_until = switch_mode(), time.time() + 4
+                continue
             if key in PAGE_KEYS:
                 page = PAGE_KEYS[key]
             elif key in (ord("\t"), curses.KEY_RIGHT):

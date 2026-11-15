@@ -9,9 +9,13 @@
         [--faults FILE] Apply a JSON list of errors, raw bodies and delays, one step per incoming API request.
         [--real]        --real: no stand-in model. A call seen before is replayed; anything new goes to the real
                         API with the app's own key (Anthropic, OpenAI, Azure/Foundry) and its answer is saved.
-        [--agent]       Default: sonnet[medium] when the claude CLI exists. --auto CMD runs any command instead
-                        (prompt on stdin, JSON on stdout). --agent: a coding agent serves requests via next/answer.
+        [--agent]       Default: the coding agent saved by install or `mockingbird agent` (sonnet[medium] for Claude
+                        Code). --auto CMD runs any command instead (prompt on stdin, JSON on stdout). --agent: a coding
+                        agent serves requests via next/answer.
                         Every call is logged (metadata only) to ~/.local/state/mockingbird/calls.db.
+  agent [claude|codex|opencode|clear]
+                        show which installed coding agent answers requests with no --model; with a name, save it
+                        (install saves the first one it finds); clear forgets the saved choice
   stats                 print the analytics (all calls ever, across projects)
   run [serve options] -- COMMAND ...
                         start an isolated bridge, route only COMMAND to it, then clean up; returns its exit code.
@@ -148,7 +152,8 @@ def configure(args):
     elif not spec and not state.AUTO:
         spec = agent.default_spec()
         if not spec:
-            log.log("no CLI found: agent mode (or pass --model to select an offline replay namespace)")
+            log.log("no coding agent found (claude, codex or opencode): agent mode, a subagent answers. "
+                    "Install one for automatic answers.")
     if spec:
         state.AUTO = agent.auto_cmd(spec)
     return spec, opts.plain
@@ -242,6 +247,30 @@ def purge_cache(folder, yes=False, interactive=None):
     for f in files:
         f.unlink(missing_ok=True)
     print(f"Deleted {len(files)} saved answers.")
+
+
+def agent_command(args):
+    """`agent` shows the default coding agent; `agent <claude|codex|opencode>` saves one; `agent clear` forgets it.
+    `agent --default` is what install.sh runs: it saves the first installed agent only when nothing is saved yet,
+    so reinstalling or updating keeps the user's choice, and it prints one line."""
+    if args == ["--default"]:
+        if agent.saved_agent() is None and agent.installed_agents():
+            agent.save_agent(agent.installed_agents()[0][0])
+        print(agent.describe_default())
+        return 0
+    if args == ["clear"]:
+        agent.save_agent(None)
+    elif args:
+        clis = [cli for cli, _, _ in agent.AGENTS]
+        if len(args) != 1 or args[0] not in clis:
+            sys.exit("usage: mockingbird agent [claude|codex|opencode|clear]")
+        if not shutil.which(args[0]):
+            sys.exit(f"{args[0]} is not installed on this machine")
+        agent.save_agent(args[0])
+    for cli, _, name in agent.installed_agents():
+        print(f"installed: {name} ({cli})")
+    print(agent.describe_default())
+    return 0
 
 
 def update():
@@ -585,6 +614,27 @@ def selftest():
     print("selftest ok")
 
 
+def rotate_mode(meta):
+    """Rotate backends only between requests, keeping request and cache identity stable."""
+    with state.MODE_LOCK:
+        if state.REPLAY:
+            return "Mode locked in offline replay"
+        if state.ACTIVE_REQUESTS:
+            return "Wait for active calls to finish"
+        options = [("real", None, "Real API")]
+        options += [(name, spec, label) for name, spec, label in agent.installed_agents()]
+        current = "real" if state.REAL else next(
+            (name for name, spec, _ in agent.installed_agents() if state.AUTO == agent.auto_cmd(spec)), None)
+        index = next((i for i, (name, _, _) in enumerate(options) if name == current), -1)
+        name, spec, label = options[(index + 1) % len(options)]
+        if name != "real":
+            label = agent.mode_label(name)
+        state.REAL = name == "real"
+        state.AUTO = agent.auto_cmd(spec) if spec else ""
+        meta["mode"] = label
+        return f"Mode: {label}"
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     cmd, args = (argv[0], argv[1:]) if argv else ("", [])
@@ -606,14 +656,18 @@ def main(argv=None):
                 threading.Thread(target=srv.serve_forever, daemon=True).start()
                 hooked = (os.environ.get("MOCKINGBIRD_ENABLED") == "1" and
                           str(HOOK_DIR) in os.environ.get("PYTHONPATH", "").split(os.pathsep))
-                dashboard.run(state.JOURNAL, cache_dir=state.CACHE, meta={
+                meta = {
                     "mode": ("offline replay" if state.REPLAY else "real API, repeats replayed" if state.REAL
+                             else agent.mode_label({"sonnet": "claude", "codex": "codex", "opencode": "opencode"}[spec])
+                             if spec in ("sonnet", "codex", "opencode")
                              else f"{agent.spec_label(spec)} answers" if spec
                              else "custom auto command" if state.AUTO else "agent mode (subagents answer)"),
                     "address": f"http://127.0.0.1:{srv.server_port}",
                     "cache": str(state.CACHE) if state.CACHE else "",
                     "hook": "on in this terminal" if hooked else "off here (env vars or per-venv hook)",
-                })
+                }
+                dashboard.run(state.JOURNAL, cache_dir=state.CACHE, meta=meta,
+                              switch_mode=lambda: rotate_mode(meta))
             else:
                 srv.serve_forever()
         except KeyboardInterrupt:
@@ -639,6 +693,8 @@ def main(argv=None):
         os.execvp("bash", ["bash", str(script), *args])
     elif cmd == "update":
         update()
+    elif cmd == "agent":
+        sys.exit(agent_command(args))
     elif cmd == "stats":
         print(dashboard.report(dashboard.Journal()))
     elif cmd == "next":
