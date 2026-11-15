@@ -30,6 +30,7 @@ class SDKFlow(unittest.TestCase):
     anthropic = None
     openai = None
     url = ""
+    recorded_usage = None
 
     def test_anthropic_image_input(self):
         reply = self.anthropic.messages.create(model="claude-test", max_tokens=64, messages=[{"role": "user", "content": [
@@ -105,7 +106,14 @@ class SDKFlow(unittest.TestCase):
                 messages=[{"role": "user", "content": "Reply with exactly hello."}])
         self.assertEqual(reply.content[0].text.strip(), "hello")
         self.assertEqual(reply.stop_reason, "end_turn")
-        self.assertEqual(reply.usage.input_tokens, 0)
+        self.assertGreater(
+            reply.usage.input_tokens + (reply.usage.cache_read_input_tokens or 0)
+            + (reply.usage.cache_creation_input_tokens or 0), 0)
+        usage = reply.usage.model_dump()
+        if state.REPLAY:
+            self.assertEqual(usage, self.recorded_usage)
+        else:
+            type(self).recorded_usage = usage
 
     def test_anthropic_stream(self):
         with self.anthropic.messages.stream(model="claude-test", max_tokens=64,

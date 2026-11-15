@@ -23,12 +23,12 @@ QUIET = False  # True while the dashboard owns the terminal
 
 CLAUDE_CMD = ('claude -p --model {m} --effort {e} --tools "" --system-prompt "You stand in for an LLM API. '
               'Follow the instructions in the user message exactly." --strict-mcp-config --disable-slash-commands '
-              '--no-session-persistence')
+              '--no-session-persistence --output-format json')
 # Codex: prompt on stdin ("-"). Without -m it uses the model in your Codex config (your ChatGPT plan).
-CODEX_CMD = "codex exec --ephemeral --sandbox read-only{model}{effort} -"
+CODEX_CMD = "codex exec --ephemeral --sandbox read-only{model}{effort} --json -"
 # opencode takes the message as an argument, not stdin, so the prompt goes in a file it attaches.
 # Without -m it uses the default model in your opencode config (any provider you set up there).
-OPENCODE_CMD = ('opencode run --archived{model} -f {{prompt_file}} '
+OPENCODE_CMD = ('opencode run --archived{model} -f {{prompt_file}} --format json '
                 '"Follow the instructions in the attached file exactly. Reply with only the JSON object it asks for."')
 # Environment variables a child CLI must not inherit while they point back at this bridge.
 REDIRECT_VARS = ("ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "AZURE_OPENAI_ENDPOINT",

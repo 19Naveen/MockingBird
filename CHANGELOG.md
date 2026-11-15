@@ -1,5 +1,6 @@
 # Unreleased
 
+- Built-in CLI stand-ins now expose available answering-CLI token usage in provider-shaped responses, including streaming where supported. These figures describe the stand-in, not the target production model; replay repeats the recorded usage. Changing the built-in commands to request structured output changes their cache identities, so existing stand-in fixtures must be recorded again.
 - Moved the implementation into a standard `src/` layout with `pyproject.toml`, and grouped the package by concern (`core/`, `api/`, `providers/`, `media/`, `ui/`). `bridge.py` remains the installed entry point, `mockingbird_hook.py` stays standalone, and the opt-in provider checks moved to `tests/smoke/`. No command, environment variable or wire-format changes.
 - Claude Code image and PDF input now uses the stream-json output that its stream-json input requires, so multimodal requests work with current Claude Code releases.
 

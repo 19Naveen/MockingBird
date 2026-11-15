@@ -455,7 +455,7 @@ def selftest():
     # --model specs pick the right CLI: Claude plan, ChatGPT plan via Codex, or whatever opencode is set up with
     assert agent.auto_cmd("sonnet").startswith("claude -p --model sonnet --effort medium")
     assert agent.auto_cmd("codex") == state.CODEX_CMD.format(model="", effort="") and agent.auto_cmd("gpt-5[low]") == (
-        "codex exec --ephemeral --sandbox read-only -m gpt-5 -c model_reasoning_effort=low -")
+        "codex exec --ephemeral --sandbox read-only -m gpt-5 -c model_reasoning_effort=low --json -")
     assert agent.auto_cmd("opencode").startswith("opencode run --archived -f {prompt_file}")
     assert " -m anthropic/claude-sonnet-5-5 " in agent.auto_cmd("anthropic/claude-sonnet-5-5")
     assert _version("1.10.0") > _version("1.9.0")

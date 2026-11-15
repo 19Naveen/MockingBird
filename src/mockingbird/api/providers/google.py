@@ -5,6 +5,7 @@ import re
 from urllib.parse import unquote, urlsplit
 
 from ...media.attachments import InputError
+from ..responses import usage_counts
 
 CONTENT_TYPE = "text/event-stream"
 _ROUTE = re.compile(
@@ -171,8 +172,14 @@ def response(ans, canonical_req, rid):
         call_id = "call_" + hashlib.sha256(f"{seed}:{index}".encode()).hexdigest()[:24]
         content.append({"functionCall": {"id": call_id, "name": call["name"], "args": call.get("input", {})}})
     stop = "MAX_TOKENS" if ans.get("stop") == "max_tokens" else "STOP"
+    prompt, completion, cached, _cache_write, cost = usage_counts(ans)
+    metadata = {"promptTokenCount": prompt, "candidatesTokenCount": completion, "totalTokenCount": prompt + completion}
+    if cached:
+        metadata["cachedContentTokenCount"] = cached
+    if cost is not None:
+        metadata["cost_usd"] = cost
     return {"candidates": [{"index": 0, "content": {"role": "model", "parts": content}, "finishReason": stop}],
-            "usageMetadata": {"promptTokenCount": 0, "candidatesTokenCount": 0, "totalTokenCount": 0},
+            "usageMetadata": metadata,
             "modelVersion": canonical_req.get("model", "bridge"), "responseId": "bridge-" + rid}
 
 

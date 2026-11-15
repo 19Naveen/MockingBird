@@ -115,7 +115,7 @@ In both modes:
 ```
 - Text around the JSON (prose, code fences) is tolerated. `JSONDecoder.raw_decode` reads the first decodable object without greedily consuming trailing braces. Invalid reply shapes are rejected, including under `python -O`.
 - `stop` is optional. It is inferred as `tool_use` when tool calls are present, otherwise `end_turn`. It maps to OpenAI's `stop`, `tool_calls` and `length`.
-- The bridge adds ids, usage (all zeros), model and finish reason in the request's own format. If the request set `stream: true`, it sends the same data as SSE events.
+- The bridge adds ids, model, finish reason and available stand-in CLI usage in the request's own format. If the request set `stream: true`, it sends the same data as SSE events.
 
 ## 7. Disable test mode and clean up
 
@@ -129,6 +129,6 @@ Full requests and tool results are untrusted simulation data. They can inject in
 ## Limits to tell the user
 
 - Replies come from a different model acting as the target model. Fresh answers vary from run to run and won't match production quality exactly, so test the app's flow and parsing, not the exact wording.
-- Token usage is always 0. Tests that check cost or usage numbers will not match.
+- Stand-in token usage measures the answering CLI, not the requested production model. CLI cost estimates are not necessarily billed amounts; replay repeats recorded usage without a new model call. Agent mode, custom commands and older fixtures may report zero. Use `--real` for actual upstream usage where supported, but do not count replayed usage as a new charge.
 - Prompts still go to the CLI's model provider. Use synthetic test data, not real personal data.
 - The provider adapters implement common Converse/`generateContent` features. They do not emulate every field: Gemini built-in tools, Google file uploads, Bedrock managed prompts and S3 references return 501. Images, text files and PDFs sent inline are supported; remote URLs and arbitrary local paths are not fetched.

@@ -15,6 +15,48 @@ def _ids(req, prefix, n):
     return [prefix + hashlib.sha256(f"{seed}:{i}".encode()).hexdigest()[:24] for i in range(n)]
 
 
+def _usage(ans):
+    usage = ans.get("usage")
+    if not isinstance(usage, dict):
+        return {}
+    return usage
+
+
+def _counts(usage):
+    prompt = int(usage.get("prompt_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or 0)
+    cached = int(usage.get("cached_tokens") or 0)
+    cache_write = int(usage.get("cache_write_tokens") or 0)
+    cost = usage.get("cost_usd")
+    return prompt, completion, cached, cache_write, cost if isinstance(cost, (int, float)) else None
+
+
+def usage_counts(ans):
+    return _counts(_usage(ans))
+
+
+def anthropic_usage(ans):
+    prompt, completion, cached, cache_write, cost = _counts(_usage(ans))
+    usage = {"input_tokens": max(0, prompt - cached - cache_write), "output_tokens": completion}
+    if cache_write:
+        usage["cache_creation_input_tokens"] = cache_write
+    if cached:
+        usage["cache_read_input_tokens"] = cached
+    if cost is not None:
+        usage["cost_usd"] = cost
+    return usage
+
+
+def openai_usage(ans):
+    prompt, completion, cached, _cache_write, cost = _counts(_usage(ans))
+    usage = {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
+    if cached:
+        usage["prompt_tokens_details"] = {"cached_tokens": cached}
+    if cost is not None:
+        usage["cost_usd"] = cost
+    return usage
+
+
 def anthropic_body(ans, req, rid):
     if "raw" in ans:
         return ans["raw"]
@@ -25,7 +67,7 @@ def anthropic_body(ans, req, rid):
     stop = ans.get("stop") or ("tool_use" if ans.get("tool_calls") else "end_turn")
     return {"id": "msg_bridge_" + rid, "type": "message", "role": "assistant", "model": req.get("model", "bridge"),
             "content": content, "stop_reason": stop, "stop_sequence": None,
-            "usage": {"input_tokens": 0, "output_tokens": 0}}
+            "usage": anthropic_usage(ans)}
 
 
 def openai_body(ans, req, rid):
@@ -41,7 +83,7 @@ def openai_body(ans, req, rid):
     return {"id": "chatcmpl-bridge-" + rid, "object": "chat.completion", "created": int(time.time()),
             "model": req.get("model", "bridge"),
             "choices": [{"index": 0, "message": msg, "finish_reason": STOP_TO_OPENAI.get(stop, stop)}],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
+            "usage": openai_usage(ans)}
 
 
 def anthropic_sse(body):
@@ -57,13 +99,14 @@ def anthropic_sse(body):
         if delta:
             ev.append(("content_block_delta", {"type": "content_block_delta", "index": i, "delta": delta}))
         ev.append(("content_block_stop", {"type": "content_block_stop", "index": i}))
+    delta_usage = {k: body["usage"][k] for k in ("output_tokens", "cost_usd") if k in body["usage"]}
     ev.append(("message_delta", {"type": "message_delta", "delta": {"stop_reason": body["stop_reason"], "stop_sequence": None},
-                                 "usage": {"output_tokens": 0}}))
+                                 "usage": delta_usage}))
     ev.append(("message_stop", {"type": "message_stop"}))
     return "".join(f"event: {n}\ndata: {json.dumps(d)}\n\n" for n, d in ev)
 
 
-def openai_sse(body):
+def openai_sse(body, req=None):
     c = body["choices"][0]
     m = c["message"]
     delta = {"role": "assistant", "content": m.get("content")}
@@ -71,4 +114,9 @@ def openai_sse(body):
         delta["tool_calls"] = [{"index": i, **t} for i, t in enumerate(m["tool_calls"])]
     chunk = lambda d, f: {"id": body["id"], "object": "chat.completion.chunk", "created": body["created"],
                           "model": body["model"], "choices": [{"index": 0, "delta": d, "finish_reason": f}]}
-    return "".join(f"data: {json.dumps(x)}\n\n" for x in (chunk(delta, None), chunk({}, c["finish_reason"]))) + "data: [DONE]\n\n"
+    parts = [chunk(delta, None), chunk({}, c["finish_reason"])]
+    options = (req or {}).get("stream_options")
+    if isinstance(options, dict) and options.get("include_usage"):
+        parts.append({"id": body["id"], "object": "chat.completion.chunk", "created": body["created"],
+                      "model": body["model"], "choices": [], "usage": body["usage"]})
+    return "".join(f"data: {json.dumps(x)}\n\n" for x in parts) + "data: [DONE]\n\n"

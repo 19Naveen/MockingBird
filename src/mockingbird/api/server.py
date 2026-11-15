@@ -201,7 +201,12 @@ class Shim(BaseHTTPRequestHandler):
                 adapter = PROVIDERS.get(api)
                 body = adapter.response(ans, req, rid) if adapter else (anthropic_body if api == "anthropic" else openai_body)(ans, req, rid)
                 if req.get("stream"):
-                    stream = adapter.stream(body) if adapter else (anthropic_sse if api == "anthropic" else openai_sse)(body)
+                    if adapter:
+                        stream = adapter.stream(body)
+                    elif api == "anthropic":
+                        stream = anthropic_sse(body)
+                    else:
+                        stream = openai_sse(body, req)
                     self._send(200, stream, adapter.CONTENT_TYPE if adapter else "text/event-stream")
                 else:
                     self._send(200, body)

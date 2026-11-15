@@ -320,10 +320,13 @@ Measured on 14/11/2026: a demo app using the official `anthropic` and `openai` S
 |---|---|
 | Answers come from a stand-in model | Fresh answers vary and only imitate your real model. Test your app's flow and parsing, not answer quality |
 | Unsupported endpoints | Responses API, `count_tokens`, embeddings, Gemini built-in tools, Bedrock managed prompts/S3 references, and provider file-upload endpoints get a clear 501 error. Native Bedrock and Gemini routes are not forwarded by `--real` |
-| Unusual requests | Inline images and text/PDF files are supported as described above; long contexts can still overflow the selected model, and token usage is always 0 |
-| Exact SDK/provider fidelity | Stand-in mode supplies common fields with zero usage, emits text/tool arguments in coarse chunks, and does not generate native thinking blocks. `raw` answers can supply full response bodies, but streaming still uses the bridge's event builder. `--real` preserves upstream body/usage/SSE bytes, buffering the response before delivery; it does not preserve chunk timing or all HTTP headers |
+| Unusual requests | Inline images and text/PDF files are supported as described above; long contexts can still overflow the selected model |
+| Usage and cost | Stand-in usage describes the answering CLI, including the bridge's prompt, **not the requested production model**. CLI cost estimates are not necessarily amounts billed. Cache replay repeats recorded usage and estimates even though it makes no new model call; do not sum them as actual spend. Older fixtures, agent mode and custom commands may report zero usage. For real provider usage, use `--real` (supported Anthropic/OpenAI-compatible routes only); replay still repeats the original usage. |
+| Exact SDK/provider fidelity | Stand-in mode emits text/tool arguments in coarse chunks and does not generate native thinking blocks. `raw` answers can supply full response bodies, but streaming still uses the bridge's event builder. `--real` preserves upstream body/usage/SSE bytes, buffering the response before delivery; it does not preserve chunk timing or all HTTP headers |
 | Calls that change every run | Requests containing timestamps or random ids never match a saved answer, so they're always asked fresh |
 | Apps not started from a terminal | Set SDK base URLs in the test process, or install a hook in that Python environment and start the process with `MOCKINGBIRD_ENABLED=1` |
+
+The optional `cost_usd` field is a non-standard CLI-reported estimate, not a provider bill; some SDKs may discard it, and Codex does not report it here. Usage from a rejected first CLI attempt is not included. Built-in command changes for usage reporting change cache identities, so previously recorded stand-in fixtures need to be regenerated.
 
 ## Safety and data
 

@@ -63,19 +63,155 @@ def _child_env():
             not (k in state.REDIRECT_VARS and (redirected(v) or v == "bridge-dummy"))}
 
 
-def claude_result(stdout):
-    """Pick the final result object from Claude Code's stream-json output (one JSON object per line)."""
-    for line in reversed(stdout.splitlines()):
+class CliError(RuntimeError):
+    """The answering CLI failed or produced unreadable structured output."""
+
+
+def _json_objects(stdout):
+    """Every JSON object in stdout: one per line (stream-json/JSONL) or one whole document."""
+    objects = []
+    for line in stdout.splitlines():
         try:
-            event = json.loads(line)
+            value = json.loads(line)
         except ValueError:
             continue
-        if isinstance(event, dict) and event.get("type") == "result":
-            result = event.get("result")
-            if not isinstance(result, str):
-                raise ValueError("claude result event has no text")
-            return result
-    raise ValueError("claude output ended without a result event")
+        if isinstance(value, dict):
+            objects.append(value)
+    if not objects:
+        try:
+            value = json.loads(stdout)
+        except ValueError:
+            return []
+        if isinstance(value, dict):
+            objects.append(value)
+    return objects
+
+
+def _count(value, name, integer=True):
+    if value is None:
+        return 0
+    if (type(value) is not int if integer else type(value) not in (int, float)) or value < 0:
+        raise ValueError(f"usage {name} must be a non-negative {'integer' if integer else 'number'}")
+    return value
+
+
+def _usage(prompt=0, completion=0, cached=0, cache_write=0, cost=None):
+    """Provider-neutral counts. Anthropic excludes cached tokens from input_tokens; the rest include them."""
+    usage = {"prompt_tokens": _count(prompt, "prompt_tokens"), "completion_tokens": _count(completion, "completion_tokens"),
+             "cached_tokens": _count(cached, "cached_tokens"), "cache_write_tokens": _count(cache_write, "cache_write_tokens")}
+    if cost is not None:
+        usage["cost_usd"] = _count(cost, "cost_usd", integer=False)
+    return usage
+
+
+def claude_result(stdout):
+    """Pick the final result text from Claude Code's json or stream-json output."""
+    answer = claude_output(stdout)
+    if answer is None:
+        raise ValueError("claude output ended without a result event")
+    return answer[0]
+
+
+def claude_output(stdout):
+    """Return (text, usage) from Claude Code's json or stream-json output, or None for plain text."""
+    for event in reversed(_json_objects(stdout)):
+        if event.get("type") != "result":
+            continue
+        result = event.get("result")
+        if not isinstance(result, str):
+            raise ValueError("claude result event has no text")
+        if event.get("is_error"):
+            raise CliError("claude: " + result[:300])
+        raw = event.get("usage") or {}
+        if not isinstance(raw, dict):
+            raise ValueError("claude usage must be an object")
+        return result, _usage(
+            prompt=_count(raw.get("input_tokens"), "input_tokens") + _count(raw.get("cache_creation_input_tokens"), "cache_creation_input_tokens") +
+                   _count(raw.get("cache_read_input_tokens"), "cache_read_input_tokens"),
+            completion=_count(raw.get("output_tokens"), "output_tokens"),
+            cached=_count(raw.get("cache_read_input_tokens"), "cache_read_input_tokens"),
+            cache_write=_count(raw.get("cache_creation_input_tokens"), "cache_creation_input_tokens"),
+            cost=event.get("total_cost_usd"))
+    return None
+
+
+def codex_output(stdout):
+    """Return (text, usage) from `codex exec --json`, or None for plain text."""
+    text, usage = None, None
+    for event in _json_objects(stdout):
+        kind = event.get("type")
+        if kind == "item.completed":
+            item = event.get("item") or {}
+            if isinstance(item, dict) and item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                text = item["text"]
+        elif kind == "turn.completed":
+            raw = event.get("usage") or {}
+            if not isinstance(raw, dict):
+                raise ValueError("codex usage must be an object")
+            usage = _usage(prompt=_count(raw.get("input_tokens"), "input_tokens"),
+                           completion=_count(raw.get("output_tokens"), "output_tokens"),
+                           cached=_count(raw.get("cached_input_tokens"), "cached_input_tokens"),
+                           cache_write=_count(raw.get("cache_write_input_tokens"), "cache_write_input_tokens"))
+        elif kind == "error":
+            error = event.get("error")
+            message = error.get("message") if isinstance(error, dict) else error
+            raise CliError("codex: " + str(message or "error")[:300])
+    return (text, usage) if text is not None else None
+
+
+def opencode_output(stdout):
+    """Return (text, usage) from `opencode run --format json`, or None for plain text."""
+    texts, order = {}, []
+    prompt = completion = cached = cache_write = 0
+    cost, structured = None, False
+    for event in _json_objects(stdout):
+        kind, part = event.get("type"), event.get("part") or {}
+        if not isinstance(part, dict):
+            continue
+        if kind == "text" and isinstance(part.get("text"), str):
+            key = part.get("messageID") or ""
+            if key not in texts:
+                texts[key] = []
+                order.append(key)
+            texts[key].append(part["text"])
+        elif kind == "step_finish":
+            structured = True
+            tokens = part.get("tokens") or {}
+            if not isinstance(tokens, dict):
+                raise ValueError("opencode tokens must be an object")
+            prompt += _count(tokens.get("input"), "input")
+            completion += _count(tokens.get("output"), "output")
+            cache = tokens.get("cache") or {}
+            if not isinstance(cache, dict):
+                raise ValueError("opencode cache tokens must be an object")
+            cached += _count(cache.get("read"), "cache.read")
+            cache_write += _count(cache.get("write"), "cache.write")
+            if "cost" in part:
+                cost = (cost or 0) + _count(part["cost"], "cost", integer=False)
+        elif kind == "error":
+            error = event.get("error")
+            message = error.get("message") if isinstance(error, dict) else error
+            raise CliError("opencode: " + str(message or "error")[:300])
+    if not structured and not texts:
+        return None
+    text = "".join(texts[order[-1]]) if order else ""
+    return text, _usage(prompt, completion, cached, cache_write, cost)
+
+
+def _set_flag(argv, flag, value=None):
+    """Add a CLI flag, or replace its value, without duplicating it."""
+    if flag in argv:
+        index = argv.index(flag)
+        if value is not None:
+            if index + 1 < len(argv):
+                argv[index + 1] = value
+            else:
+                argv.append(value)
+    elif value is None:
+        argv.append(flag)
+    else:
+        argv += [flag, value]
+    return argv
 
 
 def run_auto(api, req, rid):
@@ -103,7 +239,9 @@ def run_auto(api, req, rid):
                     elif cli == "opencode":
                         argv += [v for p in images for v in ("--file", str(p))]
                     elif cli == "claude":
-                        argv += ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
+                        _set_flag(argv, "--input-format", "stream-json")
+                        _set_flag(argv, "--output-format", "stream-json")
+                        _set_flag(argv, "--verbose")
                         stdin = attachments.claude_input(stdin, images)
                     else:
                         return {"error": "image input supports the built-in claude, codex and opencode commands", "status": 501}
@@ -119,8 +257,27 @@ def run_auto(api, req, rid):
             if out.returncode != 0:
                 return {"error": f"auto command exited {out.returncode}: {out.stderr.strip()[-300:]}", "status": 502}
             try:
-                output = claude_result(out.stdout) if images and cli == "claude" else out.stdout
-                return parse_answer(output)
+                structured = ((cli == "claude" and "--output-format" in argv
+                               and argv.index("--output-format") + 1 < len(argv)
+                               and argv[argv.index("--output-format") + 1] in ("json", "stream-json"))
+                              or (cli == "codex" and "--json" in argv)
+                              or (cli == "opencode" and "--format" in argv
+                                  and argv.index("--format") + 1 < len(argv)
+                                  and argv[argv.index("--format") + 1] == "json"))
+                parser = {"claude": claude_output, "codex": codex_output, "opencode": opencode_output}.get(cli) if structured else None
+                parsed = parser(out.stdout) if parser else None
+                if parsed is None:
+                    if parser:
+                        raise CliError(f"{cli} output did not contain a final answer")
+                    output, usage = out.stdout, None
+                else:
+                    output, usage = parsed
+                ans = parse_answer(output)
+                if usage is not None:
+                    ans["usage"] = usage
+                return ans
+            except CliError as e:
+                return {"error": str(e), "status": 502}
             except (ValueError, AssertionError, KeyError, TypeError) as e:
                 last = str(e)
                 note = f"\n\nYour previous reply was rejected ({last}). Reply again with only the JSON object."
@@ -209,6 +366,17 @@ def parse_answer(text):
             raise ValueError('error needs a string message and HTTP status from 400 to 599')
     elif not isinstance(ans["raw"], dict):
         raise ValueError('"raw" must be a provider response object')
+    if ans.get("usage") is not None:
+        usage = ans["usage"]
+        if not isinstance(usage, dict):
+            raise ValueError('"usage" must be an object')
+        for key in ("prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens"):
+            value = usage.get(key, 0)
+            if type(value) is not int or value < 0:
+                raise ValueError(f'"usage.{key}" must be a non-negative integer')
+        cost = usage.get("cost_usd")
+        if cost is not None and (type(cost) not in (int, float) or cost < 0):
+            raise ValueError('"usage.cost_usd" must be a non-negative number')
     return ans
 
 

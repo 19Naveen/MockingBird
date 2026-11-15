@@ -8,6 +8,7 @@ from urllib.parse import unquote, urlsplit
 import zlib
 
 from ...media.attachments import InputError
+from ..responses import usage_counts
 
 CONTENT_TYPE = "application/vnd.amazon.eventstream"
 ROUTE = re.compile(r"/model/(.+)/(converse|converse-stream)/?$")
@@ -140,8 +141,16 @@ def response(ans, req, rid):
         tool_id = "tooluse_" + hashlib.sha256(f"{seed}:{i}".encode()).hexdigest()[:22]
         content.append({"toolUse": {"toolUseId": tool_id, "name": tool["name"], "input": tool.get("input", {})}})
     stop = ans.get("stop") or ("tool_use" if ans.get("tool_calls") else "end_turn")
+    prompt, completion, cached, cache_write, cost = usage_counts(ans)
+    usage = {"inputTokens": prompt, "outputTokens": completion, "totalTokens": prompt + completion}
+    if cached:
+        usage["cacheReadInputTokens"] = cached
+    if cache_write:
+        usage["cacheWriteInputTokens"] = cache_write
+    if cost is not None:
+        usage["cost_usd"] = cost
     return {"output": {"message": {"role": "assistant", "content": content}}, "stopReason": STOP.get(stop, stop),
-            "usage": {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0}, "metrics": {"latencyMs": 0}}
+            "usage": usage, "metrics": {"latencyMs": 0}}
 
 
 def _event(name, value):

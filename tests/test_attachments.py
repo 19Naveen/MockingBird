@@ -90,6 +90,11 @@ class AttachmentTests(unittest.TestCase):
         self.assertIn("Poppler", str(error.exception))
 
     def test_cli_image_transport_and_cleanup_for_all_backends(self):
+        expected_usage = {
+            "sonnet": {"prompt_tokens": 12, "completion_tokens": 3, "cached_tokens": 4, "cache_write_tokens": 2, "cost_usd": 0.5},
+            "codex": {"prompt_tokens": 10, "completion_tokens": 2, "cached_tokens": 3, "cache_write_tokens": 1},
+            "opencode": {"prompt_tokens": 20, "completion_tokens": 5, "cached_tokens": 6, "cache_write_tokens": 2, "cost_usd": 0.25},
+        }
         for model in ("codex", "sonnet", "opencode"):
             paths = []
 
@@ -103,17 +108,36 @@ class AttachmentTests(unittest.TestCase):
                     stdout = "\n".join([
                         json.dumps({"type": "system", "subtype": "init"}),
                         json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "red"}]}}),
-                        json.dumps({"type": "result", "subtype": "success", "result": '{"text":"red"}'}),
+                        json.dumps({"type": "result", "subtype": "success", "result": '{"text":"red"}',
+                                    "usage": {"input_tokens": 6, "cache_creation_input_tokens": 2,
+                                              "cache_read_input_tokens": 4, "output_tokens": 3},
+                                    "total_cost_usd": 0.5}),
                     ]) + "\n"
-                else:
-                    flag = "--image" if model == "codex" else "--file"
+                elif model == "codex":
+                    self.assertIn("--json", argv)
+                    flag = "--image"
                     paths.append(Path(argv[argv.index(flag) + 1]))
                     self.assertEqual(paths[0].read_bytes(), red_png())
-                    stdout = '{"text":"red"}'
+                    stdout = "\n".join([
+                        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": '{"text":"red"}'}}),
+                        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "cached_input_tokens": 3,
+                                                                        "cache_write_input_tokens": 1, "output_tokens": 2}}),
+                    ]) + "\n"
+                else:
+                    self.assertIn("--format", argv)
+                    flag = "--file"
+                    paths.append(Path(argv[argv.index(flag) + 1]))
+                    self.assertEqual(paths[0].read_bytes(), red_png())
+                    stdout = "\n".join([
+                        json.dumps({"type": "text", "part": {"messageID": "m1", "text": '{"text":"red"}'}}),
+                        json.dumps({"type": "step_finish", "part": {"messageID": "m1", "tokens": {
+                            "input": 20, "output": 5, "cache": {"read": 6, "write": 2}}, "cost": 0.25}}),
+                    ]) + "\n"
                 return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
             with self.subTest(model=model), patch.object(state, "AUTO", agent.auto_cmd(model)), patch.object(
                     agent.subprocess, "run", side_effect=cli):
-                self.assertEqual(agent.run_auto("anthropic", self.request(self.image), "test"), {"text": "red"})
+                self.assertEqual(agent.run_auto("anthropic", self.request(self.image), "test"),
+                                 {"text": "red", "usage": expected_usage[model]})
             self.assertTrue(all(not p.exists() for p in paths))
 
     def test_claude_stream_result_uses_final_result_event(self):
