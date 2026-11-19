@@ -71,7 +71,7 @@ class FoundryTests(unittest.TestCase):
         self.assertEqual(answer.call_args.args[1], body)
 
     def test_foundry_unsupported_operations_return_501(self):
-        for path in ("/models/embeddings", "/openai/v1/responses", "/api/projects/demo/agents"):
+        for path in ("/models/embeddings", "/api/projects/demo/agents"):
             with self.subTest(path=path), self.assertRaises(urllib.error.HTTPError) as error:
                 self.post(path, {})
             self.assertEqual(error.exception.code, 501)

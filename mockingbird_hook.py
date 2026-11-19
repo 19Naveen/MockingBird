@@ -39,8 +39,15 @@ def _announce(port):
     global _announced
     if not _announced:
         _announced = True
-        print(f"[mockingbird] LLM calls -> bridge on 127.0.0.1:{port} (stop the bridge to use the real API)",
-              file=sys.stderr)
+        suffix = "" if os.environ.get("MOCKINGBIRD_REQUIRE_BRIDGE") == "1" else " (stop the bridge to use the real API)"
+        print(f"[mockingbird] LLM calls -> bridge on 127.0.0.1:{port}{suffix}", file=sys.stderr)
+
+
+def _redirect_port():
+    port = bridge_port()
+    if port is None and os.environ.get("MOCKINGBIRD_REQUIRE_BRIDGE") == "1":
+        raise ConnectionError("Mockingbird bridge is unavailable; refusing a direct provider call")
+    return port
 
 
 def _redirect_url(url, headers):
@@ -49,7 +56,7 @@ def _redirect_url(url, headers):
     parsed = urlsplit(str(url))
     if not parsed.hostname or not _provider(parsed.hostname):
         return url
-    port = bridge_port()
+    port = _redirect_port()
     if port is None:
         return url
     headers["x-mockingbird-upstream"] = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
@@ -64,7 +71,7 @@ def _redirect(request):
         return
     if os.environ.get("MOCKINGBIRD_ENABLED") != "1" or not _provider(request.url.host):
         return
-    port = bridge_port()
+    port = _redirect_port()
     if port is None:
         return
     host, original_port = request.url.host, request.url.port

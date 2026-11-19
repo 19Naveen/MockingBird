@@ -29,7 +29,7 @@ There is no lint, typecheck or formatter config. CI (`.github/workflows/tests.ym
 Installer smoke, when changing `install.sh` or the payload (it writes `~/.agents/skills/mockingbird` and `~/.local/bin/mockingbird`):
 
 ```bash
-MOCKINGBIRD_SRC=. MOCKINGBIRD_NO_HOOK=1 bash install.sh
+MOCKINGBIRD_SRC=. bash install.sh
 ```
 
 ## Layout and wiring

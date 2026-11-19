@@ -11,7 +11,7 @@ from ..core import answers, log, state, store
 from ..media import attachments
 from ..ui import dashboard
 from .providers import PROVIDERS
-from .responses import anthropic_body, anthropic_sse, openai_body, openai_sse
+from .responses import anthropic_body, anthropic_sse, openai_body, openai_sse, normalize_responses, responses_body
 
 UPSTREAM_DEFAULT = {"anthropic": "https://api.anthropic.com", "openai": "https://api.openai.com"}
 # Keys are forwarded only to the providers themselves (or to an upstream you name explicitly).
@@ -25,6 +25,11 @@ KEYLIKE = re.compile(r"\b(sk|rk|pk|key|api[-_]?key)[-_][A-Za-z0-9*_-]{4,}", re.I
 
 def upstream_for(api, headers):
     """Where to forward: the env override, else the host the hook says the app was calling, else the provider."""
+    if state.PROJECT_SESSION:
+        # Project auto-routing must not send the application's credential to an override, or any other provider.
+        hinted = (headers.get("x-mockingbird-upstream") or "").rstrip("/")
+        match = ALLOWED_UPSTREAM.fullmatch(hinted)
+        return hinted if api == "openai" and match and match.group(1).endswith(".azure.com") else None
     override = os.environ.get(f"BRIDGE_UPSTREAM_{api.upper()}")
     if override:
         return override.rstrip("/")
@@ -39,8 +44,12 @@ def forward(base, path, raw, headers):
     import urllib.request, urllib.error
     sent = {k: v for k, v in headers.items() if k.lower() not in DROP_HEADERS}
     request = urllib.request.Request(base + path, data=raw, headers=sent, method="POST")
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None  # never send provider headers to a second host
+
     try:
-        with urllib.request.urlopen(request, timeout=state.TIMEOUT) as r:
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=state.TIMEOUT) as r:
             return r.status, r.headers.get("Content-Type", "application/json"), r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.headers.get("Content-Type", "application/json"), e.read()
@@ -86,14 +95,22 @@ class Shim(BaseHTTPRequestHandler):
         self._send(status, body)
 
     def do_GET(self):
-        self._send(200, {"ok": True}) if self.path.startswith("/health") else self._error("openai", 404, "not found")
+        if self.path.startswith("/health"):
+            payload = {"ok": True}
+            if state.PROJECT_SESSION:
+                payload["project_session"] = state.PROJECT_SESSION
+            self._send(200, payload)
+        else:
+            self._error("openai", 404, "not found")
 
-    def _record(self, rid, model, api, source, t0, label, status=200):
+    def _record(self, rid, model, api, source, t0, label, status=200, *, answered_by=""):
         if state.JOURNAL:
             if state.REDACT:
                 model, label = "[redacted]", "[redacted]"
             state.JOURNAL.record(rid, dashboard.Call(time.time(), model, api, source, time.time() - t0, status, label,
-                                                     "[redacted]" if state.REDACT else state.PROJECT, "" if state.REDACT else self.key))
+                                                      "[redacted]" if state.REDACT else state.PROJECT,
+                                                      "" if state.REDACT else self.key,
+                                                      "" if state.REDACT else answered_by))
 
     def _real(self, api, raw, req, rid, model, t0):
         """--real: replay an identical earlier call, otherwise forward it to the real API with the app's own
@@ -113,7 +130,8 @@ class Shim(BaseHTTPRequestHandler):
             http = json.loads(cf.read_text())["http"]
             self._send(http["status"], http["body"].encode(), http["content_type"])
             log.log(f"{rid} replayed from cache (real API answer)")
-            return self._record(rid, model, api, "CACHE", t0, http_label(http["content_type"], http["body"]))
+            return self._record(rid, model, api, "CACHE", t0, http_label(http["content_type"], http["body"]),
+                                answered_by=dashboard.real_answerer(base, http["content_type"], http["body"]))
         if state.REPLAY:
             self._error(api, 409, "bridge: offline replay cache miss")
             return self._record(rid, model, api, "ERROR", t0, "offline replay cache miss", 409)
@@ -136,7 +154,8 @@ class Shim(BaseHTTPRequestHandler):
                                       "asked": store.asked_text(req), "label": http_label(ctype, text), "via": base},
                              "http": {"status": status, "content_type": ctype, "body": text}})
         log.log(f"{rid} answered by the real API ({time.time() - t0:.1f}s)")
-        self._record(rid, model, api, "LIVE", t0, http_label(ctype, text))
+        self._record(rid, model, api, "LIVE", t0, http_label(ctype, text),
+                     answered_by=dashboard.real_answerer(base, ctype, text))
 
     def do_POST(self):
         with state.MODE_LOCK:
@@ -151,10 +170,11 @@ class Shim(BaseHTTPRequestHandler):
         t0 = time.time()
         self.key = ""  # the request's cache key, so the Cache tab can count replays per answer
         path = self.path.split("?")[0].rstrip("/")
-        api = "anthropic" if path.endswith("/messages") else "openai" if path.endswith("/chat/completions") else None
+        api = ("anthropic" if path.endswith("/messages") else "openai" if path.endswith("/chat/completions")
+               else "openai_responses" if path.endswith("/responses") else None)
         api = api or next((name for name, adapter in PROVIDERS.items() if adapter.matches(path)), None)
-        if not api:  # count_tokens, /responses, embeddings, other vendors
-            self._error("openai", 501, f"bridge: {path} not supported; use Messages, Chat Completions, Bedrock Converse or Gemini generateContent")
+        if not api:  # count_tokens, embeddings, other vendors
+            self._error("openai", 501, f"bridge: {path} not supported; use Messages, Chat Completions, Responses, Bedrock Converse or Gemini generateContent")
             return self._record(None, "(no model)", "unknown", "ERROR", t0, f"unsupported {path}", 501)
         try:
             size = int(self.headers.get("Content-Length", 0))
@@ -172,6 +192,12 @@ class Shim(BaseHTTPRequestHandler):
         except ValueError:
             self._error(api, 400, "bridge: request body is not JSON")
             return self._record(None, "(no model)", api, "ERROR", t0, "request body is not JSON", 400)
+        if api == "openai_responses" and not state.REAL:
+            try:
+                req = normalize_responses(req)
+            except attachments.InputError as e:
+                self._error(api, e.status, "bridge: " + str(e))
+                return self._record(None, "(no model)", api, "ERROR", t0, str(e), e.status)
         if api in PROVIDERS:
             if state.REAL:
                 return self._error(api, 501, f"bridge: --real forwarding is not supported for native {api}; use stand-in or offline replay mode")
@@ -199,7 +225,7 @@ class Shim(BaseHTTPRequestHandler):
             self._error(api, status, fault.get("error", "scripted failure"))
             return self._record(rid, model, api, "ERROR", t0, "scripted failure", status)
         if state.REAL:
-            return self._real(api, raw, req, rid, model, t0)
+            return self._real("openai" if api == "openai_responses" else api, raw, req, rid, model, t0)
         ans, source = answers.get_answer(api, path, req, rid)
         if ans is None:
             status, msg = 504, f"bridge: no subagent answer within {state.TIMEOUT:.0f}s"
@@ -208,7 +234,9 @@ class Shim(BaseHTTPRequestHandler):
         else:
             try:
                 adapter = PROVIDERS.get(api)
-                body = adapter.response(ans, req, rid) if adapter else (anthropic_body if api == "anthropic" else openai_body)(ans, req, rid)
+                body = (adapter.response(ans, req, rid) if adapter else responses_body(ans, req, rid)
+                        if api == "openai_responses" else
+                        (anthropic_body if api == "anthropic" else openai_body)(ans, req, rid))
                 if req.get("stream"):
                     if adapter:
                         stream = adapter.stream(body)
@@ -220,8 +248,11 @@ class Shim(BaseHTTPRequestHandler):
                 else:
                     self._send(200, body)
                 log.log(f"{rid} answered ({source}, {time.time() - t0:.1f}s)")
-                return self._record(rid, model, api, source, t0, store.describe(ans))
-            except (KeyError, TypeError, IndexError, attachments.InputError) as e:
+                return self._record(rid, model, api, source, t0, store.describe(ans),
+                                    answered_by=dashboard.standin_name(state.AUTO or "agent"))
+            except attachments.InputError as e:
+                status, msg = e.status, "bridge: " + str(e)
+            except (KeyError, TypeError, IndexError) as e:
                 status, msg = 500, f"bridge: answer could not be shaped into a {api} response: {e!r}"
         self._error(api, status, msg)
         log.log(f"{rid} error {status}: {msg}")

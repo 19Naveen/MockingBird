@@ -19,6 +19,7 @@ VERSION = "1.14.0"
 
 JOURNAL = None  # dashboard.Journal while `serve` runs
 PROJECT = Path.cwd().name  # the folder the server runs in, shown per call
+PROJECT_SESSION = ""  # nonempty when the app discovers the bridge through its project
 QUIET = False  # True while the dashboard owns the terminal
 
 CLAUDE_CMD = ('claude -p --model {m} --effort {e} --tools "" --system-prompt "You stand in for an LLM API. '

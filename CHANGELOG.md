@@ -1,5 +1,11 @@
 # Unreleased
 
+- Fresh installs and upgrades never add, refresh, or remove shell hooks. Existing users can remove the legacy global hook with `mockingbird hook uninstall`; manual hook installation is still available.
+- Live and Cache distinguish the app's requested model from the answering backend. Cache details wrap inside the panel and indent JSON answers.
+- Cooperating Azure projects can start a project-local dashboard with just `mockingbird`; the app discovers it without a hook or environment flag. The dashboard starts with real Azure forwarding, and keeps provider switching, caching, and analytics.
+- `mockingbird run --hook-only` preserves configured endpoint URLs for Python apps that require HTTPS. Its temporary hook redirects supported provider calls locally and refuses direct fallback if the private bridge stops.
+- OpenAI/Azure Responses supports stateless text and inline image/file inputs with JSON output in stand-in mode; Real API mode forwards Responses requests unchanged. Responses streaming, tools and conversation state remain unsupported in stand-in mode. PDFs require Poppler.
+- The Cache tab shows input and output token counts for the selected original answer when usage is available; replay does not spend those tokens again.
 - Press `p` in the dashboard to rotate between the real API and installed Claude Code, Codex and opencode stand-ins. Switching waits for active calls to finish and is disabled during offline replay.
 - The mode indicator shows the answering model when it can be determined, and `(default)` when it cannot.
 - The installer now picks the coding agent that answers requests with no `--model`: Claude Code if installed, otherwise Codex, otherwise opencode. It prints which one, and keeps any choice already saved, so updates do not change it. Install never prompts. `mockingbird agent` shows the choice, and `mockingbird agent codex` (or `claude`, `opencode`, `clear`) changes it. `serve` uses the saved agent when it is still installed, and falls back to the first one found; with none installed it stays in agent mode.

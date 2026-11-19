@@ -56,14 +56,22 @@ The installer:
 
 1. Puts the tool in `~/.agents/skills/mockingbird` and checks that Python can start it. The full tests run separately in CI.
 2. Adds the `mockingbird` command to `~/.local/bin`.
-3. Leaves shell startup files alone on a new install. The optional hook requires both installation and a per-process opt-in.
+3. Leaves shell startup files and existing hooks alone on fresh installs and upgrades.
 4. Puts the skill in the shared folder `~/.agents/skills`, which Codex and opencode read. Nothing goes into agent-specific folders.
 
-To install the optional shell hook, run `mockingbird hook install` or set `MOCKINGBIRD_INSTALL_HOOK=1` during installation. An upgrade refreshes an existing global hook to add the opt-in guard. Reinstall any older per-environment hook with `mockingbird hook install /path/to/python`. Restart existing Python processes after upgrading.
+If an older installation added a hook to `.zshrc` or `.bashrc` and you no longer need it, run `mockingbird hook uninstall`, then open a new terminal. That removes only Mockingbird's global hook and shell blocks; it keeps the cache, history, and any separate virtualenv hook. `mockingbird hook install` is still available if you explicitly want the global hook.
 
 The curl command downloads the installer and files from `main`, so it follows repository changes without a version in the URL. Read `install.sh` before you pipe it to bash. `mockingbird update` uses published release tags as described below.
 
 ## Use
+
+### Automatic connection for a cooperating project
+
+From the root of a project that declares `{"auto_route":"azure-openai"}` in `.mockingbird.json`, run `mockingbird` (or `mockingbird serve`). The bridge advertises its local port and session in `.llm-bridge/active.json` for the app's own Azure client to discover. The app must implement this single integration; merely starting the bridge cannot reroute an unchanged app. No Python hook, environment flag, or global registration is used.
+
+The dashboard starts in Real API mode and forwards to the Azure OpenAI/Foundry host named by the app. Press `p` to switch to an installed stand-in, or pass `--model` to start with a specific one. Cache and Analytics work as usual. Use synthetic inputs for stand-ins, and add `--redact` if you do not want prompts and answers cached.
+
+### Private tests and manual routing
 
 ```bash
 mockingbird run --model codex -- pytest
@@ -106,8 +114,8 @@ The hook does not patch `httpx` or `httpx2` unless the process starts with `MOCK
 
 | Command | What it does |
 |---|---|
-| `run [serve options] -- COMMAND` | Runs a command against its own temporary bridge, then cleans up |
-| `serve` | Starts the server and dashboard. With no `--model`, the coding agent saved at install answers, or agent mode if none is installed |
+| `run [serve options] [--hook-only] -- COMMAND` | Runs a command against its own temporary bridge, then cleans up. Use `--hook-only` for Python apps that require HTTPS provider URLs |
+| `serve` | Starts the server and dashboard. An integrated Azure project defaults to Real API; elsewhere it uses the saved coding agent, or agent mode if none is installed |
 | `serve --real` | Uses the real API with your own keys, and replays any call it has seen before ([below](#real-api-with-repeats-replayed)) |
 | `serve --model opus[max]` | Picks the model and effort, such as `sonnet[high]` or `haiku` |
 | `serve --plain` | Logs plain lines instead of drawing the dashboard (automatic with no terminal) |
@@ -265,7 +273,7 @@ Press `p` to rotate between the real API and installed Claude Code, Codex and Op
 
 <p align="center"><img src="docs/analytics.png" alt="The Analytics tab: totals, the last 14 days, speed and replay rate per model, failed calls" width="100%"></p>
 
-**3 Cache** lists every saved answer: when it was saved, the model, what was asked, the answer, and how often it was replayed. Use ↑ ↓ to select one and read it in full below. Press `x` twice to delete it, and the next identical call is asked fresh.
+**3 Cache** lists every saved answer: when it was saved, the model, what was asked, the answer, and how often it was replayed. Use ↑ ↓ to select one and read it in full below. The selected answer shows input and output tokens when the original response included usage; `—` means unavailable. These are the original answer's counts, not new tokens spent on replay. Stand-in counts describe the answering CLI, not the requested production model. Press `x` twice to delete it, and the next identical call is asked fresh.
 
 <p align="center"><img src="docs/cache.png" alt="The Cache tab: saved answers, with the selected one shown in full" width="100%"></p>
 
@@ -322,7 +330,7 @@ Measured on 14/11/2026: a demo app using the official `anthropic` and `openai` S
 | What | What happens |
 |---|---|
 | Answers come from a stand-in model | Fresh answers vary and only imitate your real model. Test your app's flow and parsing, not answer quality |
-| Unsupported endpoints | Responses API, `count_tokens`, embeddings, Gemini built-in tools, Bedrock managed prompts/S3 references, and provider file-upload endpoints get a clear 501 error. Native Bedrock and Gemini routes are not forwarded by `--real` |
+| Unsupported endpoints | `count_tokens`, embeddings, Gemini built-in tools, Bedrock managed prompts/S3 references, and provider file-upload endpoints get a clear 501 error. The OpenAI/Azure Responses API supports stateless text and inline image/file messages with JSON output in stand-in mode; streaming, tools, conversation state and remote or uploaded files return 501. Real mode forwards Responses requests unchanged. Native Bedrock and Gemini routes are not forwarded by `--real` |
 | Unusual requests | Inline images and text/PDF files are supported as described above; long contexts can still overflow the selected model |
 | Usage and cost | Stand-in usage describes the answering CLI, including the bridge's prompt, **not the requested production model**. CLI cost estimates are not necessarily amounts billed. Cache replay repeats recorded usage and estimates even though it makes no new model call; do not sum them as actual spend. Older fixtures, agent mode and custom commands may report zero usage. For real provider usage, use `--real` (supported Anthropic/OpenAI-compatible routes only); replay still repeats the original usage. |
 | Exact SDK/provider fidelity | Stand-in mode emits text/tool arguments in coarse chunks and does not generate native thinking blocks. `raw` answers can supply full response bodies, but streaming still uses the bridge's event builder. `--real` preserves upstream body/usage/SSE bytes, buffering the response before delivery; it does not preserve chunk timing or all HTTP headers |

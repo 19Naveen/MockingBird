@@ -229,5 +229,26 @@ class EmptyStateTests(unittest.TestCase):
         self.assertIn("No calls yet", win.row(2))
 
 
+class AnalyticsSpacingTests(unittest.TestCase):
+    def test_spacing_adapts_to_terminal_height(self):
+        model = dashboard.ModelStats("test-model", 1, 0, 1, 0, 1.0)
+        stats = dashboard.Analytics(total=1, fresh=1, hit_rate=0, saved=0, p50=1, p95=1, slowest=1,
+                                    per_model=[model], projects=[("test-project", 1)],
+                                    daily=[(1700000000, 0, 1)], first_at=1700000000)
+        colors = {**COLORS, "border": 0, "name": 0, "err": 0}
+        gaps = []
+        for height in (29, 42):
+            win = FakeWindow(height, 120)
+            dashboard._analytics_page(win, stats, colors)
+            rows = [win.row(y) for y in range(height)]
+            headings = ("Last 14 days", "Speed of fresh answers", "Replayed from the cache",
+                        "Failed calls", "Projects")
+            indices = [next(i for i, row in enumerate(rows) if heading in row) for heading in headings]
+            self.assertEqual(indices, sorted(indices))
+            self.assertEqual(rows[-1], "")
+            gaps.append(indices[-1] - indices[0])
+        self.assertGreater(gaps[1], gaps[0])
+
+
 if __name__ == "__main__":
     unittest.main()

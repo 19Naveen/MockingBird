@@ -38,6 +38,8 @@ Use **auto mode** unless its CLI is missing or the user asks for agent mode. In 
 
 For ordinary auto-mode test runs, prefer `python3 "$BRIDGE" run --model <spec> -- <test command>`. It starts a private bridge on a free port, sets test-only SDK URLs/dummy keys and a temporary Python hook, preserves the command's exit code, and cleans up on exit or Ctrl-C. It does not change global hook state or shell files. Use the manual steps below for a persistent dashboard or agent mode.
 
+If the Python app requires an HTTPS provider URL, use `run --hook-only --model <spec> -- <test command>`. This keeps the app's endpoints unchanged and uses the temporary Python hook to redirect supported clients and provider hosts. If the private bridge stops, the hook refuses direct calls to those hosts. Stand-in mode still sets dummy API keys.
+
 Repeat recorded fixtures offline with `BRIDGE_CACHE=./fixtures python3 "$BRIDGE" run --replay --model <same spec> -- <test command>`. No CLI or provider access is needed; a miss returns 409. Use the same `BRIDGE_NAMESPACE` as the recording run. Keys include selected CLI command/model/effort and API; changing a CLI's configured default requires an explicit model or a new namespace. Pre-1.14 stand-in entries remain viewable but do not replay automatically.
 
 Fault simulation requires `--faults <JSON file>` explicitly; it is off otherwise. A list such as `[{"status":429,"error":"rate limited"},{"delay":2},{"body":"not JSON"}]` applies one step per incoming request (including SDK retries), then resumes normal behavior. Injected replies bypass the cache. Parallel callers consume steps in arrival order; use an isolated sequential test when order matters. This simulates failures, not provider quotas.
@@ -46,6 +48,8 @@ Inline PNG/JPEG/GIF/WebP image blocks/data URLs, UTF-8 text documents and base64
 
 ## 3. Enable test mode
 
+For a cooperating app that declares `{"auto_route":"azure-openai"}` in `.mockingbird.json`, run `mockingbird` in its root. No hook or environment flag is needed. It starts in Real API mode, and `p` switches to an installed stand-in. Cache and Analytics work as usual. Real API cache misses incur normal Azure billing; use synthetic data for stand-ins and `--redact` if you don't want prompts and answers cached.
+
 1. Start the bridge in the background from the project folder, and keep it running until step 7. The cache defaults to shared user state, not the project. Run in the background, it logs plain lines instead of drawing its dashboard:
    ```bash
    python3 "$BRIDGE" serve --model <model>[<effort>]   # auto mode
@@ -53,13 +57,13 @@ Inline PNG/JPEG/GIF/WebP image blocks/data URLs, UTF-8 text documents and base64
    # env: BRIDGE_PORT=8787 BRIDGE_TIMEOUT=900 BRIDGE_PARALLEL=4 BRIDGE_CACHE=<folder>|off (default ~/.local/state/mockingbird/cache)
    ```
 2. Route the app's calls to the bridge. Pick one way:
-   - **A. Optional hook (Python apps with hard-coded provider URLs).** New installs do not change shell startup files. Prefer a hook scoped to the app's environment, and opt in only the test command:
+   - **A. Optional hook (Python apps with hard-coded provider URLs).** Installs and upgrades leave shell startup files and existing hooks alone. For a persistent bridge, prefer a hook scoped to the app's environment, and opt in only the test command:
      ```bash
      python3 "$BRIDGE" hook install <app's python, e.g. .venv/bin/python>
      python3 "$BRIDGE" hook status  <same python>   # shows hook + whether the bridge is running
      MOCKINGBIRD_ENABLED=1 .venv/bin/python -m pytest
      ```
-     Only processes started with `MOCKINGBIRD_ENABLED=1` patch `httpx`/`httpx2` and redirect provider calls while `serve` runs. Do not export it globally. Without the opt-in, unrelated scripts keep their original destinations. An optional global hook (`hook install` without a Python argument) uses conditional `PYTHONPATH`; run `MOCKINGBIRD_ENABLED=1 bash -ic 'pytest'` or `zsh -ic` to load it. When `serve` stops, opted-in hooks fall back to the real API: use dummy keys to prevent billing. Never enable the hook in production. `hook uninstall <python>` removes it.
+     Only processes started with `MOCKINGBIRD_ENABLED=1` patch `httpx`/`httpx2` and redirect provider calls while `serve` runs. Do not export it globally. Without the opt-in, unrelated scripts keep their original destinations. When `serve` stops, opted-in hooks fall back to the real API: use dummy keys to prevent billing. Never enable the hook in production. `hook uninstall <python>` removes the virtualenv hook. To remove a legacy global hook from `.zshrc` and `.bashrc`, run `mockingbird hook uninstall` without a Python argument and open a new terminal.
    - **B. Env vars (any language, preferred).** Point the SDK at the bridge with a dummy key, so a call that misses the bridge fails auth instead of being billed:
 
    | SDK | Env for the test process only |
@@ -97,7 +101,7 @@ Inline PNG/JPEG/GIF/WebP image blocks/data URLs, UTF-8 text documents and base64
    - **Test the app's retry logic**: submit `{"error": "overloaded", "status": 529}` or `429` on purpose.
 
 In both modes:
-- **Unsupported endpoint** (`count_tokens`, OpenAI `/responses`, embeddings, provider file uploads, Gemini built-in tools, Bedrock managed prompts/S3 references, …): the bridge returns 501 with the path. Report it to the user. Never reroute it to the live API. Native Bedrock and Gemini routes are stand-in/replay only; `--real` returns 501 for them.
+- **Unsupported endpoint** (`count_tokens`, embeddings, provider file uploads, Gemini built-in tools, Bedrock managed prompts/S3 references, …): the bridge returns 501 with the path. OpenAI/Azure `/responses` supports stateless text and inline images/files with JSON output in stand-in mode; streaming, tools and conversation state return 501. Real mode forwards Responses requests unchanged. Report unsupported features to the user; never silently reroute to the live API. Native Bedrock and Gemini routes are stand-in/replay only; `--real` returns 501 for them.
 - **Full response body needed** (thinking blocks, citations, logprobs): `{"raw": <full provider response body>}` bypasses normal body shaping. Streaming still uses the bridge's coarse event builder; it does not emulate every provider event. Use `--real` and your own API keys for actual upstream bodies and SSE bytes (buffered before delivery).
 
 ## 5. Cache (replay)

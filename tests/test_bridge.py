@@ -132,6 +132,25 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(upstream.call_count, 1)
         self.assertTrue(all(r == replies[0] for r in replies))
 
+    def test_live_history_keeps_actual_backend_when_cache_is_disabled(self):
+        state.CACHE = None
+        state.AUTO = agent.auto_cmd("sonnet")
+        state.JOURNAL = dashboard.Journal(self.root / "calls.db")
+        url = self.server()
+        recorded = threading.Event()
+        record = state.JOURNAL.record
+
+        def finish(*args):
+            record(*args)
+            recorded.set()
+
+        with patch.object(state.JOURNAL, "record", side_effect=finish), \
+                patch.object(agent, "run_auto", return_value={"text": "synthetic"}):
+            self.post(url, self.req)
+            self.assertTrue(recorded.wait(timeout=5))
+        call = state.JOURNAL.calls()[0]
+        self.assertEqual((call.model, call.source, call.answered_by), ("test", "FRESH", "Claude Code (Sonnet)"))
+
     def test_real_redact_keeps_no_content_in_cache_journal_or_log(self):
         state.REAL, state.REDACT = True, True
         state.JOURNAL = dashboard.Journal(self.root / "calls.db")
@@ -350,6 +369,69 @@ assert asyncio.run(httpx.AsyncClient().send(Request())) == "127.0.0.1"
 '''
         result = self.runner(code, "--agent")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_hook_only_keeps_https_endpoint_and_blocks_provider_fallback(self):
+        code = '''
+import os
+from unittest.mock import patch
+from urllib.parse import urlsplit
+import mockingbird_hook as hook
+endpoint = os.environ["AZURE_OPENAI_ENDPOINT"]
+assert endpoint == "https://synthetic.openai.azure.com"
+assert os.environ["AZURE_OPENAI_API_KEY"] == "bridge-dummy"
+url = endpoint + "/openai/v1/responses"
+headers = {}
+assert urlsplit(hook._redirect_url(url, headers)).hostname == "127.0.0.1"
+assert headers["x-mockingbird-upstream"] == endpoint
+assert hook._redirect_url("https://example.test", {}) == "https://example.test"
+with patch.object(hook, "bridge_port", return_value=None):
+    try:
+        hook._redirect_url(url, {})
+    except ConnectionError:
+        pass
+    else:
+        raise AssertionError("provider fallback should be blocked")
+'''
+        with patch.dict(os.environ, {"AZURE_OPENAI_ENDPOINT": "https://synthetic.openai.azure.com"}):
+            result = self.runner(code, "--agent", "--hook-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_project_opt_in_is_scoped_and_private_runs_ignore_it(self):
+        env = {k: v for k, v in os.environ.items() if k != "BRIDGE_STATE"}
+        code = (
+            'from unittest.mock import patch; from mockingbird.cli import project_bridge; '
+            'from pathlib import Path; '
+            'assert project_bridge() is None; '
+            'Path(".mockingbird.json").write_text(\'{"auto_route": "azure-openai"}\'); '
+            'assert project_bridge() == Path.cwd() / ".llm-bridge/active.json"; '
+            'p = patch.dict("os.environ", {"BRIDGE_STATE": "private.json"}); p.start(); '
+            'assert project_bridge() is None'
+        )
+        env["PYTHONPATH"] = str(ROOT / "src")
+        result = subprocess.run([sys.executable, "-c", code], env=env, cwd=self.root,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_project_only_forwards_to_configured_azure_host(self):
+        with patch.object(state, "PROJECT_SESSION", "project"), \
+                patch.dict(os.environ, BRIDGE_UPSTREAM_OPENAI="https://override.example"):
+            endpoint = "https://test-deployment.openai.azure.com"
+            self.assertEqual(server.upstream_for("openai", {"x-mockingbird-upstream": endpoint}), endpoint)
+            self.assertIsNone(server.upstream_for("openai", {}))
+            self.assertIsNone(server.upstream_for("openai", {"x-mockingbird-upstream": "https://api.openai.com"}))
+            self.assertIsNone(server.upstream_for("anthropic", {"x-mockingbird-upstream": endpoint}))
+
+    def test_project_defaults_to_real_but_keeps_cache_and_explicit_modes(self):
+        cache = state.CACHE
+        for args, real, spec, command in (
+            ([], True, None, ""),
+            (["--model", "sonnet"], False, "sonnet", agent.auto_cmd("sonnet")),
+            (["--auto", "custom"], False, None, "custom"),
+            (["--agent"], False, None, ""),
+        ):
+            with self.subTest(args=args), patch.multiple(state, REAL=False, AUTO="", CACHE=cache):
+                self.assertEqual(cli.configure(args, default_real=True), (spec, False))
+                self.assertEqual((state.REAL, state.AUTO, state.CACHE), (real, command, cache))
 
     def test_runner_command_and_missing_command(self):
         result = self.runner('import sys; print("command ran")', "--agent")

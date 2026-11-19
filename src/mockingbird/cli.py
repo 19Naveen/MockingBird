@@ -17,7 +17,7 @@
                         show which installed coding agent answers requests with no --model; with a name, save it
                         (install saves the first one it finds); clear forgets the saved choice
   stats                 print the analytics (all calls ever, across projects)
-  run [serve options] -- COMMAND ...
+  run [serve options] [--hook-only] -- COMMAND ...
                         start an isolated bridge, route only COMMAND to it, then clean up; returns its exit code.
   update                install the newest release from GitHub (your history and saved answers stay)
   uninstall [--purge]   remove mockingbird; --purge also deletes the history and saved answers
@@ -101,7 +101,7 @@ del _chain
 '''
 
 
-def configure(args):
+def configure(args, *, default_real=False):
     """Shared options for serve and the bridge subprocess started by run."""
     import argparse, math
     parser = argparse.ArgumentParser(prog="mockingbird serve")
@@ -115,7 +115,8 @@ def configure(args):
     parser.add_argument("--replay", action="store_true")
     parser.add_argument("--faults")
     opts = parser.parse_args(args)
-    state.REAL = state.REAL or opts.real
+    state.REAL = state.REAL or opts.real or (
+        default_real and not (opts.model or opts.auto or opts.agent or state.AUTO))
     state.REPLAY = state.REPLAY or opts.replay
     state.REDACT = state.REDACT or opts.redact
     if state.REPLAY and (not state.CACHE or state.REDACT):
@@ -163,9 +164,11 @@ def run_command(args):
     """Own two process groups: a private bridge and the command under test. Never touch global hook state."""
     import tempfile
     if "--" not in args:
-        sys.exit("usage: mockingbird run [serve options] -- COMMAND ...")
+        sys.exit("usage: mockingbird run [serve options] [--hook-only] -- COMMAND ...")
     split = args.index("--")
     options, command = args[:split], args[split + 1:]
+    hook_only = "--hook-only" in options
+    options = [arg for arg in options if arg != "--hook-only"]
     if not command:
         sys.exit("run needs a command after --")
     configure(options)  # reject invalid options before starting anything
@@ -189,13 +192,15 @@ def run_command(args):
                 time.sleep(0.05)
             port = json.loads(active.read_text())["port"]
             env = {**os.environ, "MOCKINGBIRD_ENABLED": "1", "MOCKINGBIRD_STATE": str(active),
-                   "PYTHONPATH": str(root) + os.pathsep + os.environ.get("PYTHONPATH", ""),
-                   "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}",
-                   "OPENAI_BASE_URL": f"http://127.0.0.1:{port}/v1", "AZURE_OPENAI_ENDPOINT": f"http://127.0.0.1:{port}",
-                   "ANTHROPIC_FOUNDRY_BASE_URL": f"http://127.0.0.1:{port}/anthropic",
-                   "AZURE_AI_ENDPOINT": f"http://127.0.0.1:{port}/models", "AZURE_INFERENCE_ENDPOINT": f"http://127.0.0.1:{port}/models",
-                   "GOOGLE_GEMINI_BASE_URL": f"http://127.0.0.1:{port}", "GOOGLE_VERTEX_BASE_URL": f"http://127.0.0.1:{port}",
-                   "AWS_ENDPOINT_URL_BEDROCK_RUNTIME": f"http://127.0.0.1:{port}"}
+                   "PYTHONPATH": str(root) + os.pathsep + os.environ.get("PYTHONPATH", "")}
+            if hook_only:
+                env["MOCKINGBIRD_REQUIRE_BRIDGE"] = "1"
+            else:
+                base = f"http://127.0.0.1:{port}"
+                env.update(ANTHROPIC_BASE_URL=base, OPENAI_BASE_URL=f"{base}/v1", AZURE_OPENAI_ENDPOINT=base,
+                           ANTHROPIC_FOUNDRY_BASE_URL=f"{base}/anthropic", AZURE_AI_ENDPOINT=f"{base}/models",
+                           AZURE_INFERENCE_ENDPOINT=f"{base}/models", GOOGLE_GEMINI_BASE_URL=base,
+                           GOOGLE_VERTEX_BASE_URL=base, AWS_ENDPOINT_URL_BEDROCK_RUNTIME=base)
             if not state.REAL:
                 env.update({key: "bridge-dummy" for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AZURE_OPENAI_API_KEY",
                     "ANTHROPIC_FOUNDRY_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")})
@@ -635,20 +640,46 @@ def rotate_mode(meta):
         return f"Mode: {label}"
 
 
+def project_bridge():
+    """A cooperating project can request direct discovery instead of the global Python hook."""
+    if "BRIDGE_STATE" in os.environ:  # includes the private `run` subprocess
+        return None
+    config = Path.cwd() / ".mockingbird.json"
+    try:
+        data = json.loads(config.read_text())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        sys.exit(f"Cannot read {config.name}: {e}")
+    if data != {"auto_route": "azure-openai"}:
+        sys.exit(f'{config.name} must contain {{"auto_route": "azure-openai"}}')
+    return config.parent / ".llm-bridge" / "active.json"
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     cmd, args = (argv[0], argv[1:]) if argv else ("", [])
+    project_file = project_bridge() if cmd in ("", "serve") else None
+    if project_file and not cmd:
+        cmd = "serve"
     if cmd in ("", "help", "-h", "--help"):
         print(__doc__)
         return 0
     if cmd == "serve":
-        spec, plain = configure(args)
+        if project_file:
+            import secrets
+            state.PROJECT_SESSION = secrets.token_hex(16)
+        spec, plain = configure(args, default_real=project_file is not None)
         # Dashboard in a real terminal; plain log lines when asked, or when an agent runs us in the background.
         live = not plain and sys.stdout.isatty() and sys.stdin.isatty()
         state.JOURNAL = dashboard.Journal()
         srv = server.serve()
-        state.STATE.parent.mkdir(exist_ok=True)
-        store.write(state.STATE, {"port": srv.server_port, "pid": os.getpid()})  # switches hooked apps to the bridge
+        active_file = project_file or state.STATE
+        active_file.parent.mkdir(parents=True, exist_ok=True)
+        active = {"port": srv.server_port, "pid": os.getpid()}
+        if project_file:
+            active["project_session"] = state.PROJECT_SESSION
+        store.write(active_file, active)
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # so `kill` also runs the cleanup below
         try:
             if live:
@@ -675,9 +706,16 @@ def main(argv=None):
         finally:
             if live:
                 srv.shutdown()
-            state.STATE.unlink(missing_ok=True)  # hooked apps go back to the real API
+            if project_file:
+                try:
+                    if json.loads(active_file.read_text()) == active:
+                        active_file.unlink(missing_ok=True)
+                except (OSError, ValueError):
+                    pass
+            else:
+                active_file.unlink(missing_ok=True)
             state.QUIET = False
-            log.log("stopped: hooked apps now use the real API")
+            log.log("stopped")
     elif cmd == "run":
         sys.exit(run_command(args))
     elif cmd == "hook" and len(args) in (1, 2) and args[0] in ("install", "uninstall", "status"):

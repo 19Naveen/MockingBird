@@ -3,7 +3,6 @@
 #   curl -fsSL https://raw.githubusercontent.com/19Naveen/MockingBird/main/install.sh | bash
 # Env: MOCKINGBIRD_BASE    (raw URL to download from; defaults to main; update pins it to a release tag)
 #      MOCKINGBIRD_SRC     (local folder to copy from instead of downloading)
-#      MOCKINGBIRD_INSTALL_HOOK (set to 1 to install the optional, opt-in shell hook)
 set -euo pipefail
 
 NAME=mockingbird
@@ -75,21 +74,6 @@ case "$agent_line" in
   *) done_ "$agent_line" ;;
 esac
 
-if [ "${MOCKINGBIRD_INSTALL_HOOK:-}" = 1 ] && [ -z "${MOCKINGBIRD_NO_HOOK:-}" ]; then
-  python3 "$DEST/bridge.py" hook install </dev/null >/dev/null
-  shells=""
-  for rc in .bashrc .zshrc; do
-    grep -q '# >>> mockingbird >>>' "$HOME/$rc" 2>/dev/null && shells="$shells${shells:+ and }~/$rc"
-  done
-  done_ "Hook added to ${shells:-your shell}"
-else
-  # Refresh any older global hook so an upgrade also gets the opt-in guard.
-  if [ -f "$HOME/.mockingbird/hook/sitecustomize.py" ]; then
-    python3 "$DEST/bridge.py" hook install </dev/null >/dev/null
-  fi
-  note "Hook is optional; use SDK base URLs, or run mockingbird hook install"
-fi
-
 mkdir -p "$HOME/.local/bin"
 # A launcher, not a symlink: the command keeps working even if bridge.py loses its execute bit.
 rm -f "$HOME/.local/bin/$NAME"
@@ -107,9 +91,9 @@ done_ "Skill in ~/.agents/skills, the shared folder Codex and opencode read"
 cat <<EOF
 
   ${B}Next${X}
-    1. Run ${B}mockingbird serve${X}
-    2. Point your test SDK base URL at http://127.0.0.1:8787 (OpenAI: /v1)
-    3. Run your tests with a dummy API key (see README)
+    In a project with Mockingbird integration: run ${B}mockingbird${X} from its root.
+    For a private test run: ${B}mockingbird run -- <test command>${X}.
+    For manual SDK routing: run ${B}mockingbird serve${X} and see the README.
 
   ${D}Docs  $REPO_URL${X}
 

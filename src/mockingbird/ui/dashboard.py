@@ -16,13 +16,17 @@ import collections
 import curses
 import json
 import os
+import re
+import shlex
 import sqlite3
 import textwrap
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
+from urllib.parse import urlsplit
 
 DEFAULT_DB = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "mockingbird" / "calls.db"
 #: One answer cache for every project, beside the journal, so it never depends on where the server started.
@@ -66,6 +70,7 @@ class Call:
     label: str
     project: str
     key: str = ""  # the request's cache key, so replays can be counted per saved answer
+    answered_by: str = ""
 
 
 class Journal:
@@ -83,9 +88,12 @@ class Journal:
         conn = sqlite3.connect(self.path, timeout=10.0)
         if not self._ready:
             conn.executescript(SCHEMA)
-            if "key" not in {row[1] for row in conn.execute("PRAGMA table_info(calls)")}:
-                conn.execute("ALTER TABLE calls ADD COLUMN key TEXT DEFAULT ''")  # journals from v1.5/v1.6
-                conn.commit()
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")  # more than one bridge can open the journal
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(calls)")}
+                for name in ("key", "answered_by"):
+                    if name not in columns:
+                        conn.execute(f"ALTER TABLE calls ADD COLUMN {name} TEXT DEFAULT ''")
             self._ready = True
         return conn
 
@@ -99,10 +107,10 @@ class Journal:
         conn = self._connect()
         try:
             with conn:
-                conn.execute("INSERT INTO calls (at, model, api, source, seconds, status, label, project, key)"
-                             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                conn.execute("INSERT INTO calls (at, model, api, source, seconds, status, label, project, key, answered_by)"
+                             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                              (call.at, call.model, call.api, call.source, call.seconds, call.status, call.label,
-                              call.project, call.key))
+                               call.project, call.key, call.answered_by))
         finally:
             conn.close()
 
@@ -116,7 +124,8 @@ class Journal:
             return []
         conn = self._connect()
         try:
-            rows = conn.execute("SELECT at, model, api, source, seconds, status, label, project, COALESCE(key, '')"
+            rows = conn.execute("SELECT at, model, api, source, seconds, status, label, project, COALESCE(key, ''),"
+                                " COALESCE(answered_by, '')"
                                 " FROM calls ORDER BY at").fetchall()
         finally:
             conn.close()
@@ -139,6 +148,65 @@ class CacheEntry:
     last_used: float | None = None
     legacy: bool = False  # saved before v1.7: the file holds only the answer
     via: str = ""  # set for answers from the real API (serve --real): where they came from
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    answered_by: str = "Unknown"
+
+
+def standin_name(command: str) -> str:
+    """Use the saved executable and an explicit model only, never the app's requested model."""
+    if not isinstance(command, str):
+        return "Unknown"
+    if command == "agent":
+        return "Subagent"
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return "Unknown"
+    if not argv:
+        return "Unknown"
+    cli = Path(argv[0]).name
+    name = {"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode"}.get(cli)
+    if name is None:
+        return "Custom stand-in"
+    for i, arg in enumerate(argv):
+        flag, _, model = arg.partition("=")
+        if flag in ("-m", "--model"):
+            model = model or (argv[i + 1] if i + 1 < len(argv) else "")
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/#-]{0,79}", model):
+                if cli == "claude" and model in ("sonnet", "opus", "haiku"):
+                    model = model.title()
+                return f"{name} ({model})"
+            break
+    return name
+
+
+def _http_events(ctype: str, body: str):
+    chunks = (line[5:].strip() for line in body.splitlines() if line.startswith("data:")) \
+        if "event-stream" in ctype else (body,)
+    for chunk in chunks:
+        try:
+            event = json.loads(chunk)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(event, dict):
+            yield event
+
+
+def real_answerer(base: str, ctype: str, body: str) -> str:
+    try:
+        host = (urlsplit(base).hostname or "") if isinstance(base, str) else ""
+    except ValueError:
+        host = ""
+    provider = ("Azure" if host.endswith(".azure.com") else
+                "OpenAI" if host == "api.openai.com" else "Anthropic" if host == "api.anthropic.com" else "")
+    label = f"Real API ({provider})" if provider else "Real API"
+    for event in _http_events(ctype, body):
+        for obj in (event, event.get("message"), event.get("response")):
+            model = obj.get("model") if isinstance(obj, dict) else None
+            if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/#-]{0,79}", model):
+                return f"{label} · {model}"
+    return label
 
 
 def cached_answer(data: dict) -> dict:
@@ -167,6 +235,10 @@ def http_answer_text(ctype: str, body: str) -> str:
         data = json.loads(body)
     except ValueError:
         return body[:2000]
+    if data.get("object") == "response" and isinstance(data.get("output"), list):
+        return "\n".join(part.get("text", "") for item in data["output"] if isinstance(item, dict)
+                         for part in item.get("content", []) if isinstance(part, dict)
+                         and part.get("type") == "output_text")
     if isinstance(data.get("content"), list):  # Anthropic
         out = [b.get("text", "") for b in data["content"] if b.get("type") == "text"]
         out += [f"→ calls {b.get('name')}({json.dumps(b.get('input', {}))})"
@@ -189,6 +261,49 @@ def answer_text(ans: dict) -> str:
     return "\n".join(p for p in parts if p)
 
 
+def cached_tokens(data: dict) -> tuple[int | None, int | None]:
+    """Original response usage, not new usage incurred by a cache replay."""
+    http = data.get("http")
+    if isinstance(http, dict):
+        body = http.get("body", "")
+        events = []
+        if "event-stream" in http.get("content_type", ""):
+            for line in body.splitlines():
+                if line.startswith("data:"):
+                    try:
+                        events.append(json.loads(line[5:].strip()))
+                    except ValueError:
+                        pass
+        else:
+            try:
+                events.append(json.loads(body))
+            except (ValueError, TypeError):
+                pass
+        usage = {}
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            message = event.get("message")
+            for candidate in ((message.get("usage") if isinstance(message, dict) else None), event.get("usage")):
+                if isinstance(candidate, dict):
+                    usage.update(candidate)
+    else:
+        answer = cached_answer(data)
+        usage = answer.get("usage", {}) if isinstance(answer, dict) else {}
+    if not isinstance(usage, dict):
+        return None, None
+    def count(*keys):
+        for key in keys:
+            value = usage.get(key)
+            if type(value) is int and value >= 0:
+                return value
+        return None
+    prompt = count("prompt_tokens", "input_tokens")
+    if prompt is not None and "prompt_tokens" not in usage:
+        prompt += (count("cache_read_input_tokens") or 0) + (count("cache_creation_input_tokens") or 0)
+    return prompt, count("completion_tokens", "output_tokens")
+
+
 def cache_entries(folder: Path | None, calls: Sequence[Call]) -> list[CacheEntry]:
     """Every saved answer, newest first, with how often each was replayed (from the journal)."""
     # shortcut: reads every cache file each refresh; fine to a few thousand answers, then index them.
@@ -208,13 +323,18 @@ def cache_entries(folder: Path | None, calls: Sequence[Call]) -> list[CacheEntry
             continue
         meta = data.get("meta") if ("answer" in data or "http" in data) else None
         http = data.get("http")
+        tokens_in, tokens_out = cached_tokens(data)
+        info = meta or {}
+        answered_by = (real_answerer(info.get("via", ""), http["content_type"], http["body"]) if http else
+                       standin_name(info.get("backend") or ""))
         out.append(CacheEntry(
             key=f.stem, saved=(meta or {}).get("saved") or f.stat().st_mtime, model=(meta or {}).get("model", "—"),
             project=(meta or {}).get("project", "—"), asked=(meta or {}).get("asked", "(saved before v1.7)"),
             label=(meta or {}).get("label", ""),
             answer=http_answer_text(http["content_type"], http["body"]) if http else answer_text(cached_answer(data)),
             size=f.stat().st_size, used=used[f.stem], last_used=last.get(f.stem), legacy=meta is None,
-            via=(meta or {}).get("via", "") if http else ""))
+            via=info.get("via", "") if http else "", tokens_in=tokens_in, tokens_out=tokens_out,
+            answered_by=answered_by))
     return sorted(out, key=lambda e: -e.saved)
 
 
@@ -688,7 +808,7 @@ def _live(win, snap: Snapshot, c: dict[str, int], meta: dict[str, str]) -> None:
     reserved = row + len(snap.rows) + RECENT + 8
     row = _chart(win, snap, total, c, row, usable, min(CHART_MAX_HEIGHT, height - reserved))
 
-    row = _title(win, row, "Models", f"last {snap.window}", c)
+    row = _title(win, row, "Requested models", f"last {snap.window}", c)
     for name, at, size in _COLS:
         _put(win, row, at, f"{name:>{size - 1}}" if at >= 36 else name, c["muted"])
     trend_width = min(TREND_BUCKETS, usable - _TREND_AT)
@@ -711,13 +831,19 @@ def _live(win, snap: Snapshot, c: dict[str, int], meta: dict[str, str]) -> None:
             _put(win, row, _TREND_AT, sparkline(r.trend, trend_width, peak=peak_trend or None), c["ok"])
         row += 1
 
-    row = _title(win, row + 1, "Recent", "", c)
+    row = _title(win, row + 1, "Recent", "requested model → answering backend", c)
     attr = {"CACHE": c["ok"], "FRESH": c["fresh"], "AGENT": c["fresh"], "ERROR": c["err"]}
-    for call in snap.recent[-max(0, height - row - 2):]:
+    cached_backends = {entry.key: entry.answered_by for entry in snap.entries}
+    recent_room = max(0, height - row - 2)
+    for call in snap.recent[-recent_room:] if recent_room else ():
         x = _put(win, row, 0, time.strftime("%H:%M:%S", time.localtime(call.at)), c["muted"])
         x = _put(win, row, x + 2, f"{_model(call.model)[:20]:<20}", c["name"])
         x = _put(win, row, x + 1, f"{WORD.get(call.source, call.source):<9}", attr.get(call.source, c["text"]))
         x = _put(win, row, x, f"{call.seconds:>5.1f}s", c["muted"])
+        backend = call.answered_by or cached_backends.get(call.key) or {
+            "LIVE": "Real API", "AGENT": "Subagent"}.get(call.source, "")
+        if backend:
+            x = _put(win, row, x + 2, _ellipsis(backend, min(36, usable - x - 2)), c["accent"])
         what = " ".join((snap.asked.get(call.key) or call.label).split())  # what was asked, when the cache has it
         room = usable - x - 3
         what = what if len(what) <= room else what[:max(0, room - 1)] + "…"
@@ -895,13 +1021,70 @@ def _analytics_page(win, a: Analytics, c: dict[str, int]) -> None:
         return r
     sections.append(projects)
 
+    # Spend spare terminal height on whitespace, but keep the compact layout when
+    # the sections need the room (for example, with several models or errors).
+    heights = [
+        7,
+        1 + max(1, min(5, sum(m.mean_fresh is not None for m in a.per_model))),
+        1 + min(5, sum(bool(m.cached) for m in a.per_model))
+        + int(any(m.fresh and not m.cached for m in a.per_model)),
+        1 + max(1, len(a.error_rows)),
+        1 + len(a.projects),
+    ]
+    gap = max(1, min(3, (bottom + 1 - row - sum(heights)) // len(sections)))
     for section in sections:
-        if row + 3 > bottom:
+        if row + gap + 2 > bottom:
             break
-        row = section(row + 1)
+        row = section(row + gap)
 
 
 # Cache: gotodo's list. A row per saved answer, the selected one with an accent bar, the full text below.
+
+def _cells(char: str) -> int:
+    if unicodedata.combining(char) or unicodedata.category(char) == "Cf":
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+
+
+def _clip_cells(text: str, width: int) -> str:
+    used = 0
+    for i, char in enumerate(text):
+        used += _cells(char)
+        if used > width:
+            return text[:i]
+    return text
+
+
+def _ellipsis(text: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    clipped = _clip_cells(text, width)
+    return clipped if clipped == text else _clip_cells(clipped, width - 1) + "…"
+
+
+def _panel_lines(text: str, width: int):
+    """Word-wrap one paragraph, splitting wide glyphs on terminal columns, not code points."""
+    text = "".join(" " if unicodedata.category(c) == "Cc" else c for c in text.expandtabs(4))
+    if not text.strip():
+        yield ""
+        return
+    for line in textwrap.wrap(text, width, replace_whitespace=False, drop_whitespace=False):
+        while line:
+            part = _clip_cells(line, width)
+            if not part:
+                break
+            yield part.rstrip()
+            line = line[len(part):]
+
+
+def _pretty_answer(answer: str) -> str:
+    if answer.lstrip().startswith(("{", "[")):
+        try:
+            return json.dumps(json.loads(answer), ensure_ascii=False, indent=2)
+        except (ValueError, RecursionError):
+            pass
+    return answer
+
 
 def _cache_page(win, entries: list[CacheEntry], c: dict[str, int], meta: dict[str, str], selected: int) -> None:
     height, width = win.getmaxyx()
@@ -921,33 +1104,44 @@ def _cache_page(win, entries: list[CacheEntry], c: dict[str, int], meta: dict[st
                  f"{len(entries):,} answers, {_size(sum(e.size for e in entries))}, in {shown}", c)
     row += 1
 
-    answer_w = 30
-    asked_w = max(16, usable - 42 - answer_w - 8)
-    for name, at in (("Saved", 2), ("Model", 20), ("Asked", 42), ("Answer", 42 + asked_w), ("Used", 42 + asked_w + answer_w)):
-        _put(win, row, at, name, c["muted"])
+    if height < 7 or usable < 22:
+        return
+    backend_x = 20
+    used_x = usable - 7
+    backend_w = min(30, max(0, used_x - backend_x - 2))
+    asked_x = backend_x + backend_w + 2
+    answer_w = 30 if usable - asked_x >= 54 else 0
+    asked_w = max(0, used_x - asked_x - answer_w)
+    if asked_w < 10:
+        asked_w = 0
+    for name, at, capacity in (("Saved", 2, 16), ("Answered by", backend_x, backend_w),
+                               ("Asked", asked_x, asked_w - 2), ("Answer", used_x - answer_w, answer_w),
+                               ("Used", used_x, max(0, usable - used_x) if backend_w >= 10 else 0)):
+        _put(win, row, at, _ellipsis(name, capacity), c["muted"])
     row += 1
-    list_rows = max(3, min(len(entries), (height - row - 6) // 2))
+    list_rows = min(len(entries), max(1, (height - row - 12) // 2))
+    selected = max(0, min(selected, len(entries) - 1))
     first = min(max(0, selected - list_rows + 1), max(0, len(entries) - list_rows))
     for i, e in enumerate(entries[first:first + list_rows], start=first):
         mine = i == selected
         bold = curses.A_BOLD if mine else 0
         _put(win, row, 0, "▌" if mine else " ", c["accent"])
         _put(win, row, 2, time.strftime("%d/%m %H:%M", time.localtime(e.saved)), (c["accent"] if mine else c["muted"]) | bold)
-        _put(win, row, 20, _model(e.model)[:21], c["name"] | bold)
-        asked = " ".join(e.asked.split())
-        asked = asked if len(asked) < asked_w - 1 else asked[:asked_w - 2] + "…"
-        _put(win, row, 42, asked, (c["accent"] if mine else (c["muted"] if e.legacy else c["text"])) | bold)
-        answer = " ".join(e.answer.split())
-        _put(win, row, 42 + asked_w, answer[:answer_w - 2] + ("…" if len(answer) > answer_w - 2 else ""),
-             c["muted"] | bold)
-        _put(win, row, 42 + asked_w + answer_w, f"{e.used}×" if e.used else "—", c["ok"] if e.used else c["muted"])
+        _put(win, row, backend_x, _ellipsis(e.answered_by, backend_w), c["name"] | bold)
+        _put(win, row, asked_x, _ellipsis(" ".join(e.asked.split()), asked_w - 2),
+             (c["accent"] if mine else (c["muted"] if e.legacy else c["text"])) | bold)
+        _put(win, row, used_x - answer_w, _ellipsis(" ".join(e.answer.split()), answer_w - 2), c["muted"] | bold)
+        if backend_w >= 10:
+            _put(win, row, used_x, _ellipsis(f"{e.used}×" if e.used else "—", 7), c["ok"] if e.used else c["muted"])
         row += 1
     if len(entries) > list_rows:
         _put(win, row, 2, f"{selected + 1} of {len(entries)}", c["muted"])
     row += 2
 
-    e = entries[min(selected, len(entries) - 1)]
-    box_w = min(usable - 1, 110)
+    e = entries[selected]
+    box_w = min(usable - 1, 120)
+    if row + 2 >= height - 1:
+        return
     x = _put(win, row, 0, "╭─ ", c["border"])
     x = _put(win, row, x, "Selected answer", c["accent"] | curses.A_BOLD)
     _put(win, row, x, " " + "─" * max(0, box_w - x - 1) + "╮", c["border"])
@@ -955,15 +1149,24 @@ def _cache_page(win, entries: list[CacheEntry], c: dict[str, int], meta: dict[st
     replays = (f"replayed {e.used} {'time' if e.used == 1 else 'times'}, most recently at "
                f"{time.strftime('%H:%M', time.localtime(e.last_used))} on {day(e.last_used)}"
                if e.last_used else "not replayed yet")
-    lines: list[tuple[str, int]] = [
-        (f"{_model(e.model)} in {e.project}, {'from the real API' if e.via else 'from the stand-in model'}, "
-         f"saved {day(e.saved)}, {replays}.", c["muted"]), ("", 0),
-        ("Asked", c["accent"] | curses.A_BOLD)]
-    lines += [(w, c["text"]) for w in textwrap.wrap(" ".join(e.asked.split()), box_w - 6) or ["—"]]
+    tokens = (f"Tokens  in {e.tokens_in if e.tokens_in is not None else '—'}  "
+              f"out {e.tokens_out if e.tokens_out is not None else '—'} (original answer)")
+    details = [(f"Answered by: {e.answered_by}", c["accent"] | curses.A_BOLD),
+               (f"Requested: {e.model}", c["muted"]), (tokens, c["muted"]),
+               (f"{e.project} · saved {day(e.saved)} · {replays}", c["muted"]), ("", 0),
+               ("Asked (preview)", c["accent"] | curses.A_BOLD)]
+    text_width = box_w - 5
+    room = height - row - 2
+    lines = [(line, attr) for text, attr in details for line in _panel_lines(text, text_width)]
+    asked = list(_panel_lines(" ".join(e.asked.split()) or "—", text_width))
+    preview_rows = max(1, (room - len(lines) - 2) // 2)
+    if len(asked) > preview_rows:
+        asked = asked[:preview_rows]
+        asked[-1] = _clip_cells(asked[-1], text_width - 1).rstrip() + "…"
+    lines += [(line, c["text"]) for line in asked]
     lines += [("", 0), ("Answered", c["accent"] | curses.A_BOLD)]
-    for para in e.answer.splitlines() or ["—"]:
-        lines += [(w, c["text"]) for w in textwrap.wrap(para, box_w - 6) or [""]]
-    room = height - row - 3
+    for para in _pretty_answer(e.answer).splitlines() or ["—"]:
+        lines.extend((line, c["text"]) for line in _panel_lines(para, text_width))
     if len(lines) > room:
         lines = lines[:max(0, room - 1)] + [("…", c["muted"])]
     for text, attr in lines:
