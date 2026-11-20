@@ -3,7 +3,7 @@ name: mockingbird
 description: Test an app's AI features without live LLM API calls. A local stand-in endpoint catches every Anthropic/OpenAI/Azure OpenAI/Azure AI Foundry/Amazon Bedrock/Google Gemini call the app makes, a coding-agent model (e.g. Sonnet at high effort) writes the reply, and the app gets it back in the normal API format. App code stays the same. Answers are cached, so repeat runs are instant. Use for /mockingbird, "test the AI without the API", "use a subagent instead of the LLM", or mock-free AI testing. Argument: model[effort] then an optional test command, e.g. `sonnet[high] pytest tests/ai`.
 argument-hint: "<model>[<effort>] [test command]"
 metadata:
-  version: "1.14.1"
+  version: "1.14.2"
 ---
 
 # mockingbird

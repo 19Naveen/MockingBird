@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="v1.14.1" src="https://img.shields.io/badge/version-1.14.1-black">
+  <img alt="v1.14.2" src="https://img.shields.io/badge/version-1.14.2-black">
   <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-black">
   <img alt="zero Python dependencies" src="https://img.shields.io/badge/Python_dependencies-0-black">
   <img alt="Claude Code, Codex, opencode" src="https://img.shields.io/badge/works%20with-Claude%20Code%20%7C%20Codex%20%7C%20opencode-black">
@@ -61,7 +61,7 @@ The installer:
 
 If an older installation added a hook to `.zshrc` or `.bashrc` and you no longer need it, run `mockingbird hook uninstall`, then open a new terminal. That removes only Mockingbird's global hook and shell blocks; it keeps the cache, history, and any separate virtualenv hook. `mockingbird hook install` is still available if you explicitly want the global hook.
 
-The curl command downloads the installer and files from `main`, so it follows repository changes without a version in the URL. Read `install.sh` before you pipe it to bash. `mockingbird update` uses published release tags as described below.
+The curl command gets the installer and one archive from `main`, so it follows repository changes without a version in the URL. Read `install.sh` before you pipe it to bash. `mockingbird update` downloads the installer and archive from the same published release tag.
 
 ## Use
 

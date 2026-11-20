@@ -1,3 +1,7 @@
+# v1.14.2
+
+- Installs and updates from GitHub fetch the payload in one archive instead of 25 separate downloads. If the archive is unavailable, the installer falls back to individual downloads.
+
 # v1.14.1
 
 - Fixed a dashboard crash in Analytics when a horizontal bar rounded up to a full cell.
