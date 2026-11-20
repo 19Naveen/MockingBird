@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="v1.14.0" src="https://img.shields.io/badge/version-1.14.0-black">
+  <img alt="v1.14.1" src="https://img.shields.io/badge/version-1.14.1-black">
   <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-black">
   <img alt="zero Python dependencies" src="https://img.shields.io/badge/Python_dependencies-0-black">
   <img alt="Claude Code, Codex, opencode" src="https://img.shields.io/badge/works%20with-Claude%20Code%20%7C%20Codex%20%7C%20opencode-black">

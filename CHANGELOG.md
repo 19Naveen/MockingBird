@@ -1,5 +1,6 @@
-# Unreleased
+# v1.14.1
 
+- Fixed a dashboard crash in Analytics when a horizontal bar rounded up to a full cell.
 - Fresh installs and upgrades never add, refresh, or remove shell hooks. Existing users can remove the legacy global hook with `mockingbird hook uninstall`; manual hook installation is still available.
 - Live and Cache distinguish the app's requested model from the answering backend. Cache details wrap inside the panel and indent JSON answers.
 - Cooperating Azure projects can start a project-local dashboard with just `mockingbird`; the app discovers it without a hook or environment flag. The dashboard starts with real Azure forwarding, and keeps provider switching, caching, and analytics.

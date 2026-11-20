@@ -6,7 +6,7 @@
 set -euo pipefail
 
 NAME=mockingbird
-VERSION=1.14.0
+VERSION=1.14.1
 REPO_URL=https://github.com/19Naveen/MockingBird
 BASE="${MOCKINGBIRD_BASE:-https://raw.githubusercontent.com/19Naveen/MockingBird/main}"
 # The skill lives only in the shared skills folder; nothing goes into agent-specific folders.

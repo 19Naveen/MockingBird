@@ -610,10 +610,9 @@ def bar(fraction: float, width: int) -> str:
     if width <= 0:
         return ""
     filled = max(0.0, min(1.0, fraction)) * width
-    whole = int(filled)
+    whole, part = divmod(round(filled * 8), 8)
     out = "█" * whole
-    part = round((filled - whole) * 8)
-    if whole < width and part:
+    if part:
         out += HBLOCKS[part]  # left-eighth blocks: a horizontal bar must not end in a bottom-eighth "▁"
     return out + "░" * (width - len(out))
 

@@ -15,7 +15,7 @@ from ..ui import dashboard
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # the checkout or installed tree that holds bridge.py
 
-VERSION = "1.14.0"
+VERSION = "1.14.1"
 
 JOURNAL = None  # dashboard.Journal while `serve` runs
 PROJECT = Path.cwd().name  # the folder the server runs in, shown per call
